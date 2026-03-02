@@ -4,21 +4,60 @@
 
 ## Requirements
 
-- python 3.13 pr later
+### Python Version
+
+Python 3.13 or later is required.
 
 ### Install python using Mini-conda
 
-1) Download and install MiniConda from [MiniConda installation guide](https://www.anaconda.com/docs/getting-started/miniconda/install#windows-installation)
+#### Step 1: Download and install MiniConda
 
-2) Create new environment using the following command:
+Download and install MiniConda from [MiniConda installation guide](https://www.anaconda.com/docs/getting-started/miniconda/install#windows-installation)
+
+#### Step 2: Create new environment
+
+Create a new environment using the following command:
 
 ```bash
 conda create -n recruitment-system-back python=3.13
 ```
 
-3) Activate the environment:
+1) Activate the environment:
 
 ```bash
 conda activate recruitment-system-back
 ```
 
+### (Optional) Setup your command line interface for better readability
+
+```bash
+PROMPT %USERNAME%@%COMPUTERNAME%:$P$_$
+```
+
+#### and to retun back to the default
+
+```bash
+PROMPT $P$G
+```
+
+## Installation
+
+### Install Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+### setup the environment variables
+
+```bash
+copy .env.example .env
+```
+
+set your envvironment variables in the .env file.
+
+## Run the fastAPI server
+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 5000
+```
