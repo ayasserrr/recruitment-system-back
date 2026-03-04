@@ -13,11 +13,16 @@ class DataController(BaseController):
     def __init__(self):
         super().__init__()
 
-    def validate_uploaded_file(self, file: UploadFile):
+    async def validate_uploaded_file(self, file: UploadFile):
         if file.content_type not in self.app_settings.FILE_ALLOWED_TYPES:
             return False, ResponseSignal.FILE_TYPE_NOT_ALLOWED.value
             
-        if file.size > self.app_settings.FILE_MAX_SIZE * 1024 * 1024:
+        # Get file size by reading the file content
+        file_content = await file.read()
+        file_size = len(file_content)
+        await file.seek(0)  # Reset file pointer
+        
+        if file_size > self.app_settings.FILE_MAX_SIZE * 1024 * 1024:
             return False, ResponseSignal.FILE_SIZE_EXCEEDS_LIMIT.value
         
         return True, ResponseSignal.FILE_VALIDATED_SUCCESSFULLY.value

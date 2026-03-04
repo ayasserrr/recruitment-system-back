@@ -4,8 +4,9 @@ import os
 import aiofiles
 import logging
 from helpers import get_settings, settings
-from controllers import DataController, ProjectController
+from controllers import DataController, ProjectController, ProcessController
 from models import ResponseSignal
+from .schemas import processRequest
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -21,7 +22,7 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
     data_controller = DataController()
     
     # 1. Validate file (type and size)
-    is_valid, result_signal = data_controller.validate_uploaded_file(file=file)
+    is_valid, result_signal = await data_controller.validate_uploaded_file(file=file)
 
     if not is_valid:
         return JSONResponse(
@@ -60,3 +61,70 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
             "file_id": file_id,
         }
     )
+
+@data_router.post("/process/{project_id}")
+async def process_endpoint(project_id: str, process_request: processRequest):
+    
+    file_id = process_request.file_id  # Use the file_id from request body
+    chunk_size = process_request.chunk_size
+    overlap_size = process_request.overlap_size
+
+    process_controller = ProcessController(project_id=project_id) 
+
+    try:
+        print(f"Process endpoint called with file_id: {file_id}")
+        file_content = process_controller.get_file_content(file_id=file_id)
+    except Exception as e:
+        logger.error(f"Error loading file {file_id}: {e}")
+        print(f"Exception details: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"signal": "File not found or cannot be processed", "error": str(e)}
+        )
+
+    file_chunks = process_controller.process_file_content(file_content=file_content, file_id=file_id, chunk_size=chunk_size, overlap_size=overlap_size)
+
+    if file_chunks is None or len(file_chunks) == 0:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"signal": ResponseSignal.PROCESSING_FAILED.value}
+        )
+    
+    # Convert chunks to serializable format
+    chunks_data = []
+    for chunk in file_chunks:
+        chunks_data.append({
+            "content": chunk.page_content,
+            "metadata": chunk.metadata
+        })
+    
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "signal": ResponseSignal.PROCESSING_SUCCESSFUL.value,
+            "chunks": chunks_data,
+            "total_chunks": len(chunks_data)
+        }
+    )
+
+@data_router.get("/files/{project_id}")
+async def list_files(project_id: str):
+    """List all files in a project directory - for debugging"""
+    project_controller = ProjectController()
+    project_path = project_controller.get_project_path(project_id=project_id)
+    
+    try:
+        files = os.listdir(project_path)
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "project_path": project_path,
+                "files": files,
+                "total_files": len(files)
+            }
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"error": f"Project directory not found: {e}"}
+        )
