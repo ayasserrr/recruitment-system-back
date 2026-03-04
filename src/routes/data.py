@@ -1,12 +1,10 @@
 from fastapi import APIRouter, Depends, UploadFile, status
 from fastapi.responses import JSONResponse
-import os
 import aiofiles
 import logging
 from helpers import get_settings, settings
-from controllers import DataController, ProjectController, ProcessController
+from controllers import CompanyController, DataController, ProcessController
 from models import ResponseSignal
-from .schemas import processRequest
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -15,8 +13,14 @@ data_router = APIRouter(
     tags=["data"],
 )
 
-@data_router.post("/upload/{project_id}")
-async def upload_data(project_id: str, file: UploadFile, app_settings: settings = Depends(get_settings)):
+@data_router.post("/upload/{company_id}/{job_id}/{candidate_id}")
+async def upload_data(
+    company_id: str,
+    job_id: str,
+    candidate_id: str,
+    file: UploadFile,
+    app_settings: settings = Depends(get_settings),
+):
     
     # Initialize Controller
     data_controller = DataController()
@@ -29,28 +33,32 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"signal": result_signal}
         )
+
+    if data_controller.candidate_has_cv(company_id=company_id, job_id=job_id, candidate_id=candidate_id):
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={"signal": ResponseSignal.FILE_ALREADY_EXISTS.value},
+        )
     
     # 2. Generate the unique file path (now includes timestamp + clean name)
     file_path, file_id = data_controller.generate_unique_filePath(
         original_filename=file.filename,
-        project_id=project_id
+        company_id=company_id,
+        job_id=job_id,
+        candidate_id=candidate_id,
     )
     
     try:
-        # 3. Ensure the directory exists before saving
-        # This prevents FileNotFoundError if the project folder is missing
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        # 4. Save file using chunks
+        # Save file using chunks
         async with aiofiles.open(file_path, 'wb') as f:
             while chunk := await file.read(app_settings.FILE_DEFAULT_CHUNK_SIZE):
                 await f.write(chunk)
                 
     except Exception as e:
-        logger.error(f"Error saving file for project {project_id}: {e}")
+        logger.error(f"Error saving file for {company_id}/{job_id}/{candidate_id}: {e}")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"signal": ResponseSignal.FILE_UPLOAD_FAILED.value}
+            content={"signal": ResponseSignal.FILE_UPLOADED_FAILED.value}
         )
 
     # 5. Success Response
@@ -62,69 +70,120 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
         }
     )
 
-@data_router.post("/process/{project_id}")
-async def process_endpoint(project_id: str, process_request: processRequest):
-    
-    file_id = process_request.file_id  # Use the file_id from request body
-    chunk_size = process_request.chunk_size
-    overlap_size = process_request.overlap_size
-
-    process_controller = ProcessController(project_id=project_id) 
-
+@data_router.post("/process/{company_id}/{job_id}/{candidate_id}")
+async def process_candidate(company_id: str, job_id: str, candidate_id: str):
+    process_controller = ProcessController()
     try:
-        print(f"Process endpoint called with file_id: {file_id}")
-        file_content = process_controller.get_file_content(file_id=file_id)
-    except Exception as e:
-        logger.error(f"Error loading file {file_id}: {e}")
-        print(f"Exception details: {e}")
+        text = await process_controller.extract_candidate_text(
+            company_id=company_id,
+            job_id=job_id,
+            candidate_id=candidate_id,
+        )
+    except FileNotFoundError as e:
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"signal": "File not found or cannot be processed", "error": str(e)}
+            content={"signal": str(e)},
         )
 
-    file_chunks = process_controller.process_file_content(file_content=file_content, file_id=file_id, chunk_size=chunk_size, overlap_size=overlap_size)
-
-    if file_chunks is None or len(file_chunks) == 0:
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"signal": ResponseSignal.PROCESSING_FAILED.value}
-        )
-    
-    # Convert chunks to serializable format
-    chunks_data = []
-    for chunk in file_chunks:
-        chunks_data.append({
-            "content": chunk.page_content,
-            "metadata": chunk.metadata
-        })
-    
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={
-            "signal": ResponseSignal.PROCESSING_SUCCESSFUL.value,
-            "chunks": chunks_data,
-            "total_chunks": len(chunks_data)
-        }
+        content={"text": text},
     )
 
-@data_router.get("/files/{project_id}")
-async def list_files(project_id: str):
-    """List all files in a project directory - for debugging"""
-    project_controller = ProjectController()
-    project_path = project_controller.get_project_path(project_id=project_id)
-    
-    try:
-        files = os.listdir(project_path)
+
+@data_router.post("/process/{company_id}/{job_id}")
+async def process_job(company_id: str, job_id: str):
+    process_controller = ProcessController()
+    text = await process_controller.extract_job_text(company_id=company_id, job_id=job_id)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"text": text},
+    )
+
+
+@data_router.post("/process/{company_id}")
+async def process_company(company_id: str):
+    process_controller = ProcessController()
+    text = await process_controller.extract_company_text(company_id=company_id)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"text": text},
+    )
+
+
+@data_router.get("/files/")
+async def list_companies():
+    company_controller = CompanyController()
+    roots = [company_controller.uploads_dir, company_controller.legacy_uploads_dir]
+    companies_set: set[str] = set()
+    for base in roots:
+        if not base.exists():
+            continue
+        for p in base.iterdir():
+            if p.is_dir():
+                companies_set.add(p.name)
+
+    companies = sorted(companies_set)
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"companies": companies})
+
+
+@data_router.get("/files/{company_id}")
+async def list_jobs(company_id: str):
+    company_controller = CompanyController()
+    company_dir = company_controller.get_company_path(company_id=company_id, create=False)
+    if not company_dir.exists():
+        return JSONResponse(status_code=status.HTTP_200_OK, content={"company_id": company_id, "jobs": []})
+    jobs = [p.name for p in company_dir.iterdir() if p.is_dir()]
+    jobs.sort()
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"company_id": company_id, "jobs": jobs})
+
+
+@data_router.get("/files/{company_id}/{job_id}")
+async def list_candidates(company_id: str, job_id: str):
+    company_controller = CompanyController()
+    job_dir = company_controller.get_job_path(company_id=company_id, job_id=job_id, create=False)
+    if not job_dir.exists():
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"company_id": company_id, "job_id": job_id, "candidates": []},
+        )
+    candidates = [p.name for p in job_dir.iterdir() if p.is_dir()]
+    candidates.sort()
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={"company_id": company_id, "job_id": job_id, "candidates": candidates},
+    )
+
+
+@data_router.get("/files/{company_id}/{job_id}/{candidate_id}")
+async def list_candidate_cv(company_id: str, job_id: str, candidate_id: str):
+    company_controller = CompanyController()
+    candidate_dir = company_controller.get_candidate_path(
+        company_id=company_id,
+        job_id=job_id,
+        candidate_id=candidate_id,
+        create=False,
+    )
+
+    if not candidate_dir.exists():
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={
-                "project_path": project_path,
-                "files": files,
-                "total_files": len(files)
-            }
+                "company_id": company_id,
+                "job_id": job_id,
+                "candidate_id": candidate_id,
+                "files": [],
+            },
         )
-    except Exception as e:
-        return JSONResponse(
-            status_code=status.HTTP_404_NOT_FOUND,
-            content={"error": f"Project directory not found: {e}"}
-        )
+
+    cvs = [p.name for p in candidate_dir.iterdir() if p.is_file() and p.suffix.lower() in {".pdf", ".txt"}]
+    cvs.sort(reverse=True)
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "company_id": company_id,
+            "job_id": job_id,
+            "candidate_id": candidate_id,
+            "files": cvs,
+        },
+    )
