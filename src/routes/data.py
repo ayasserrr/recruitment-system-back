@@ -30,7 +30,7 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
         )
     
     # 2. Generate the unique file path (now includes timestamp + clean name)
-    file_path = data_controller.generate_unique_filename(
+    file_path, file_id = data_controller.generate_unique_filePath(
         original_filename=file.filename,
         project_id=project_id
     )
@@ -57,6 +57,6 @@ async def upload_data(project_id: str, file: UploadFile, app_settings: settings 
         status_code=status.HTTP_201_CREATED,
         content={
             "signal": ResponseSignal.FILE_UPLOADED_SUCCESSFULLY.value,
-            "file_name": os.path.basename(file_path) # Returns the new clean name
+            "file_id": file_id,
         }
     )

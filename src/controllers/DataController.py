@@ -31,14 +31,14 @@ class DataController(BaseController):
         clean_file_name = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
         return clean_file_name
 
-    def generate_unique_filename(self, original_filename: str, project_id: str):
+    def generate_unique_filePath(self, original_filename: str, project_id: str):
         project_path = ProjectController().get_project_path(project_id=project_id)
         clean_filename = self.get_clean_filename(filename=original_filename)
         
         # Adding timestamp for chronological sorting (YearMonthDay_HourMinute)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         
-        # Initial filename format: 20260302_2256_data.csv
+        # Initial filename format: 20260302_2256_data
         new_filename = f"{timestamp}_{clean_filename}"
         new_file_path = os.path.join(project_path, new_filename)
 
@@ -48,4 +48,4 @@ class DataController(BaseController):
             new_filename = f"{timestamp}_{random_key}_{clean_filename}"
             new_file_path = os.path.join(project_path, new_filename)
 
-        return new_file_path
+        return new_file_path, new_filename
