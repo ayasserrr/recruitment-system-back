@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, UploadFile, status
 from fastapi.responses import JSONResponse
 import aiofiles
 import logging
+import json
+from pathlib import Path
 from helpers import get_settings, settings
 from controllers import CompanyController, DataController, ProcessController
 from models import ResponseSignal
@@ -61,14 +63,45 @@ async def upload_data(
             content={"signal": ResponseSignal.FILE_UPLOADED_FAILED.value}
         )
 
+    process_controller = ProcessController()
+    try:
+        cv_json = await process_controller.extract_candidate_cv_json(
+            company_id=company_id,
+            job_id=job_id,
+            candidate_id=candidate_id,
+        )
+
+        candidate_dir = CompanyController().get_candidate_path(
+            company_id=company_id,
+            job_id=job_id,
+            candidate_id=candidate_id,
+            create=False,
+        )
+        cv_json_path: Path = candidate_dir / f"{candidate_id}_cv.json"
+
+        async with aiofiles.open(cv_json_path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(cv_json, ensure_ascii=False, indent=2))
+    except Exception as e:
+        logger.error(f"Error processing CV JSON for {company_id}/{job_id}/{candidate_id}: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "signal": ResponseSignal.PROCESSING_FAILED.value,
+                "file_id": file_id,
+            },
+        )
+
     # 5. Success Response
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={
             "signal": ResponseSignal.FILE_UPLOADED_SUCCESSFULLY.value,
             "file_id": file_id,
+            "cv_json_path": str(cv_json_path),
+            "cv_json": cv_json,
         }
     )
+
 
 @data_router.post("/process/{company_id}/{job_id}/{candidate_id}")
 async def process_candidate(company_id: str, job_id: str, candidate_id: str):
