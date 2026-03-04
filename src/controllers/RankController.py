@@ -19,6 +19,10 @@ class RankController(BaseController):
         self.company_controller = CompanyController()
         self.process_controller = ProcessController()
 
+    async def _save_json(self, path: Path, payload: dict[str, Any]) -> None:
+        async with aiofiles.open(path, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+
     def _ranking_dir(self, company_id: str, job_id: str) -> Path:
         job_dir = self.company_controller.get_job_path(company_id=company_id, job_id=job_id, create=False)
         if not job_dir.exists():
@@ -173,6 +177,34 @@ class RankController(BaseController):
             ranked.append(rec_out)
             rank += 1
 
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        candidate_reports: dict[str, str] = {}
+        for rec in ranked:
+            candidate_id = str(rec.get("candidate_id", ""))
+            if not candidate_id:
+                continue
+
+            candidate_dir = self.company_controller.get_candidate_path(
+                company_id=company_id,
+                job_id=job_id,
+                candidate_id=candidate_id,
+                create=False,
+            )
+            if not candidate_dir.exists():
+                continue
+
+            candidate_report = {
+                "company_id": company_id,
+                "job_id": job_id,
+                "job_requirements": job_requirements,
+                "generated_at": ts,
+                "candidate": rec,
+            }
+
+            candidate_report_path = candidate_dir / f"{candidate_id}_report.json"
+            await self._save_json(candidate_report_path, candidate_report)
+            candidate_reports[candidate_id] = str(candidate_report_path)
+
         report = {
             "company_id": company_id,
             "job_id": job_id,
@@ -182,10 +214,9 @@ class RankController(BaseController):
         }
 
         ranking_dir = self._ranking_dir(company_id=company_id, job_id=job_id)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = ranking_dir / f"{ts}.json"
-        async with aiofiles.open(report_path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(report, ensure_ascii=False, indent=2))
+        await self._save_json(report_path, report)
 
         report["report_path"] = str(report_path)
+        report["candidate_report_paths"] = candidate_reports
         return report
