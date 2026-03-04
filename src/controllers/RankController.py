@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import httpx
 from .BaseController import BaseController
 from .CompanyController import CompanyController
 from .processController import ProcessController
+from models.prompts import rank_system_prompt, rank_user_prompt
 
 
 class RankController(BaseController):
@@ -40,28 +42,10 @@ class RankController(BaseController):
         return candidates
 
     def _system_prompt(self) -> str:
-        return (
-            "You are an expert recruitment assistant.\n"
-            "Your job is to evaluate candidates based on\n"
-            "their CV and the job requirements provided.\n"
-            "Always respond in valid JSON only."
-        )
+        return rank_system_prompt()
 
     def _user_prompt(self, job_requirements: str, cv_text: str) -> str:
-        return (
-            "Job Requirements:\n"
-            f"{job_requirements}\n\n"
-            "Candidate CV:\n"
-            f"{cv_text}\n\n"
-            "Evaluate this candidate and return ONLY this JSON:\n"
-            "{\n"
-            "  'score': (0-100),\n"
-            "  'strengths': ['...', '...'],\n"
-            "  'weaknesses': ['...', '...'],\n"
-            "  'summary': '...',\n"
-            "  'recommendation': 'Highly Recommended' | 'Recommended' | 'Not Recommended'\n"
-            "}"
-        )
+        return rank_user_prompt(job_requirements=job_requirements, cv_text=cv_text)
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         start = text.find("{")
@@ -69,8 +53,15 @@ class RankController(BaseController):
         if start == -1 or end == -1 or end <= start:
             raise ValueError("No JSON object found")
         candidate = text[start : end + 1]
-        candidate = candidate.replace("'", '"')
-        return json.loads(candidate)
+
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            parsed = ast.literal_eval(candidate)
+
+        if not isinstance(parsed, dict):
+            raise ValueError("Extracted JSON is not an object")
+        return parsed
 
     async def _ollama_chat(self, system_prompt: str, user_prompt: str) -> str:
         base_url = getattr(self.app_settings, "OLLAMA_BASE_URL", "http://localhost:11434")

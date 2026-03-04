@@ -11,6 +11,7 @@ from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
 
 from .BaseController import BaseController
 from .CompanyController import CompanyController
+from models.prompts import cv_system_prompt, cv_user_prompt
 
 
 class ProcessController(BaseController):
@@ -58,85 +59,10 @@ class ProcessController(BaseController):
                 raise ValueError("Invalid Ollama response")
             return content
 
-    def _cv_system_prompt(self) -> str:
-        return (
-            "You are an expert recruitment assistant.\n"
-            "Extract structured candidate information from CV text.\n"
-            "Always respond in valid JSON only.\n"
-            "Use empty strings/arrays when information is missing."
-        )
-
-    def _cv_user_prompt(self, cv_text: str) -> str:
-        return (
-            "Candidate CV:\n"
-            f"{cv_text}\n\n"
-            "Extract and return ONLY valid JSON (double quotes only).\n"
-            "Do not include markdown, comments, or trailing commas.\n"
-            "Use empty strings/arrays when information is missing.\n"
-            "Schema (must match keys exactly):\n"
-            "{\n"
-            "  \"name\": \"\",\n"
-            "  \"email\": \"\",\n"
-            "  \"phone\": \"\",\n"
-            "  \"location\": \"\",\n"
-            "  \"linkedin\": \"\",\n"
-            "  \"github\": \"\",\n"
-            "  \"portfolio\": \"\",\n"
-            "  \"professional_summary\": \"\",\n"
-            "  \"experience_years\": \"\",\n"
-            "  \"current_job_title\": \"\",\n"
-            "  \"current_company\": \"\",\n"
-            "  \"education\": {\n"
-            "    \"degree\": \"\",\n"
-            "    \"major\": \"\",\n"
-            "    \"university\": \"\",\n"
-            "    \"graduation_year\": \"\"\n"
-            "  },\n"
-            "  \"experience\": [\n"
-            "    {\n"
-            "      \"job_title\": \"\",\n"
-            "      \"company\": \"\",\n"
-            "      \"start_date\": \"\",\n"
-            "      \"end_date\": \"\",\n"
-            "      \"responsibilities\": []\n"
-            "    }\n"
-            "  ],\n"
-            "  \"skills\": {\n"
-            "    \"technical\": [],\n"
-            "    \"soft\": [],\n"
-            "    \"languages\": []\n"
-            "  },\n"
-            "  \"certifications\": [\n"
-            "    {\n"
-            "      \"name\": \"\",\n"
-            "      \"issuer\": \"\",\n"
-            "      \"date\": \"\"\n"
-            "    }\n"
-            "  ],\n"
-            "  \"key_projects\": [\n"
-            "    {\n"
-            "      \"name\": \"\",\n"
-            "      \"description\": \"\",\n"
-            "      \"technologies\": []\n"
-            "    }\n"
-            "  ],\n"
-            "  \"languages\": [\n"
-            "    {\n"
-            "      \"language\": \"\",\n"
-            "      \"proficiency\": \"\"\n"
-            "    }\n"
-            "  ],\n"
-            "  \"awards\": [],\n"
-            "  \"publications\": [],\n"
-            "  \"volunteer_work\": [],\n"
-            "  \"references\": []\n"
-            "}"
-        )
-
     async def extract_candidate_cv_json(self, company_id: str, job_id: str, candidate_id: str) -> dict[str, Any]:
         cv_text = await self.extract_candidate_text(company_id=company_id, job_id=job_id, candidate_id=candidate_id)
-        system_prompt = self._cv_system_prompt()
-        user_prompt = self._cv_user_prompt(cv_text=cv_text)
+        system_prompt = cv_system_prompt()
+        user_prompt = cv_user_prompt(cv_text=cv_text)
 
         last_error: str | None = None
         for _ in range(2):
