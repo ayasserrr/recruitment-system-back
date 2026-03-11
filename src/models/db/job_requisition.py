@@ -6,7 +6,6 @@ class JobRequisition(Base):
     __tablename__ = "job_requisitions"
 
     requisition_id = Column(Integer, primary_key=True, autoincrement=True)
-    recruiter_id = Column(Integer, ForeignKey("recruiters.recruiter_id"), nullable=False)
     company_id = Column(Integer, ForeignKey("companies.company_id"), nullable=False)
     job_title = Column(String(255), nullable=False)
     department = Column(String(100), nullable=True)
@@ -33,7 +32,6 @@ class JobRequisition(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
-    recruiter = relationship("Recruiter", back_populates="job_requisitions")
     company = relationship("Company", back_populates="job_requisitions")
     required_skills = relationship("RequisitionRequiredSkill", back_populates="requisition")
     languages = relationship("RequisitionLanguage", back_populates="requisition")
