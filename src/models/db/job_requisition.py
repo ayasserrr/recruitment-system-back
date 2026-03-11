@@ -1,0 +1,44 @@
+from sqlalchemy import Column, Integer, String, Text, DateTime, Date, Boolean, Numeric, ForeignKey, func
+from sqlalchemy.orm import relationship
+from database.connection import Base
+
+class JobRequisition(Base):
+    __tablename__ = "job_requisitions"
+
+    requisition_id = Column(Integer, primary_key=True, autoincrement=True)
+    recruiter_id = Column(Integer, ForeignKey("recruiters.recruiter_id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.company_id"), nullable=False)
+    job_title = Column(String(255), nullable=False)
+    department = Column(String(100), nullable=True)
+    seniority_level = Column(String(50), nullable=True)
+    employment_type = Column(String(50), nullable=True)
+    location_city = Column(String(100), nullable=True)
+    location_country = Column(String(100), nullable=True)
+    remote_available = Column(Boolean, default=False)
+    min_years_experience = Column(Integer, nullable=True)
+    max_years_experience = Column(Integer, nullable=True)
+    min_education_level = Column(String(100), nullable=True)
+    field_of_study = Column(String(100), nullable=True)
+    key_responsibilities = Column(Text, nullable=True)
+    full_job_description = Column(Text, nullable=True)
+    currency = Column(String(10), nullable=True)
+    min_salary_monthly = Column(Numeric(12, 2), nullable=True)
+    max_salary_monthly = Column(Numeric(12, 2), nullable=True)
+    application_deadline = Column(Date, nullable=True)
+    contact_email = Column(String(255), nullable=True)
+    additional_notes = Column(Text, nullable=True)
+    posting_start_date = Column(Date, nullable=True)
+    cv_collection_end_date = Column(Date, nullable=True)
+    status = Column(String(50), default="Draft")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    recruiter = relationship("Recruiter", back_populates="job_requisitions")
+    company = relationship("Company", back_populates="job_requisitions")
+    required_skills = relationship("RequisitionRequiredSkill", back_populates="requisition")
+    languages = relationship("RequisitionLanguage", back_populates="requisition")
+    posting_platforms = relationship("PostingPlatform", back_populates="requisition")
+    job_posting = relationship("JobPosting", back_populates="requisition", uselist=False)
+    technical_assessment_config = relationship("TechnicalAssessmentConfig", back_populates="requisition", uselist=False)
+    technical_interview_config = relationship("TechnicalInterviewConfig", back_populates="requisition", uselist=False)
+    hr_interview_config = relationship("HRInterviewConfig", back_populates="requisition", uselist=False)
