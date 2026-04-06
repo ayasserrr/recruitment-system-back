@@ -14,6 +14,7 @@ class TechnicalAssessmentConfig(Base):
     max_attempts = Column(Integer, default=1)
     assessment_language = Column(String(50), nullable=True)
     sample_task = Column(Text, nullable=True)
+    assessment_questions = Column(Text, nullable=True)   # newline-joined custom questions
     created_at = Column(DateTime, server_default=func.now())
 
     requisition = relationship("JobRequisition", back_populates="technical_assessment_config")

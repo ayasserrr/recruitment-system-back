@@ -31,3 +31,4 @@ class Company(Base):
     # Relationships
     job_requisitions = relationship("JobRequisition", back_populates="company")
     assessment_templates = relationship("AssessmentTemplate", back_populates="company")
+    recruiters = relationship("Recruiter", back_populates="company")

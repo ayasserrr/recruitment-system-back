@@ -60,3 +60,14 @@ def create_company_token(company_id: int, email: str) -> str:
 def authenticate_company(password: str, hashed_password: str) -> bool:
     """Authenticate a company by verifying the password."""
     return verify_password(password, hashed_password)
+
+
+def create_recruiter_token(recruiter_id: int, company_id: int, email: str) -> str:
+    """Create a JWT token for a recruiter — includes both recruiter_id and company_id."""
+    token_data = {
+        "sub": email,
+        "recruiter_id": recruiter_id,
+        "company_id": company_id,
+        "type": "recruiter",
+    }
+    return create_access_token(token_data)

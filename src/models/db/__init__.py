@@ -1,4 +1,5 @@
 from models.db.company import Company
+from models.db.recruiter import Recruiter
 from models.db.job_requisition import JobRequisition
 from models.db.requisition_required_skill import RequisitionRequiredSkill
 from models.db.requisition_language import RequisitionLanguage

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from database.connection import Base
 
@@ -12,6 +12,11 @@ class HRInterviewConfig(Base):
     ai_feedback_level = Column(String(50), nullable=True)
     scoring_system = Column(String(100), nullable=True)
     candidates_to_advance = Column(Integer, nullable=True)
+    interview_format = Column(String(100), nullable=True)
+    interview_questions = Column(Text, nullable=True)    # newline-joined questions
+    culture_values = Column(Text, nullable=True)
+    decision_timeline = Column(String(50), nullable=True)
+    interviewer_notes = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     requisition = relationship("JobRequisition", back_populates="hr_interview_config")
