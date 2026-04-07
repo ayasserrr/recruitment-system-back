@@ -10,7 +10,7 @@ try:
     # Try to connect to the specific database
     engine = create_engine(database_url)
     with engine.connect() as conn:
-        print('✅ Connected to recruitment_system_db')
+        print(' Connected to recruitment_system_db')
         result = conn.execute(text('SELECT version()'))
         print(f'PostgreSQL: {result.fetchone()[0]}')
         
@@ -26,7 +26,7 @@ try:
             print(f'Alembic version table error: {e}')
             
 except Exception as e:
-    print(f'❌ Could not connect to recruitment_system_db: {e}')
+    print(f' Could not connect to recruitment_system_db: {e}')
     
     # Try to connect to postgres database and create the database
     try:
@@ -35,6 +35,6 @@ except Exception as e:
         with engine.connect() as conn:
             conn.execute(text('COMMIT'))  # Close any transaction
             conn.execute(text('CREATE DATABASE recruitment_system_db'))
-            print('✅ Created recruitment_system_db database')
+            print(' Created recruitment_system_db database')
     except Exception as e2:
-        print(f'❌ Could not create database: {e2}')
+        print(f' Could not create database: {e2}')

@@ -5,6 +5,8 @@ class settings(BaseSettings):
     APP_NAME: str
     APP_VERSION: str
 
+    DATABASE_URL: str = "postgresql://postgres:12345@localhost:5432/recruitment_system_db"
+
     FILE_ALLOWED_TYPES: list[str]
     FILE_MAX_SIZE: int
     FILE_DEFAULT_CHUNK_SIZE: int
@@ -13,8 +15,11 @@ class settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1"
     OLLAMA_TIMEOUT_SEC: int = 60
 
+    OPENAI_API_KEY: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
+        extra="ignore",
     )
 
 

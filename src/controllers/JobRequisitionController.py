@@ -1,5 +1,6 @@
 import re
 from sqlalchemy.orm import Session
+from agents.runner import trigger_pipeline
 
 from models.schemas.job_schema import JobRequisitionCreate
 from models.db.job_requisition import JobRequisition
@@ -63,7 +64,8 @@ def get_requisition_for_recruiter(
     if not requisition:
         raise ValueError(f"Requisition {requisition_id} not found.")
 
-    if requisition.recruiter_id != recruiter_id:
+    # None means a company token was used — company owners can access all their requisitions
+    if recruiter_id is not None and requisition.recruiter_id != recruiter_id:
         raise PermissionError("You do not have permission to access this requisition.")
 
     return requisition
@@ -238,6 +240,10 @@ def create_full_requisition(
         # ── commit everything atomically ──────────────────────────────────
         db.commit()
         db.refresh(requisition)
+
+        # ── fire-and-forget: launch the full recruitment pipeline ──────────
+        trigger_pipeline(requisition.requisition_id)
+
         return requisition
 
     except Exception:

@@ -22,8 +22,10 @@ security = HTTPBearer()
 
 def _get_recruiter_context(token: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """
-    Decodes the JWT and returns recruiter_id + company_id.
-    Raises 401 if the token is missing either field (i.e. it's a company token, not a recruiter token).
+    Accepts both token types:
+      - Recruiter token  → has recruiter_id + company_id
+      - Company token    → has company_id only (recruiter_id will be None)
+    Raises 401 only if the token is invalid or has neither ID.
     """
     try:
         payload = verify_token(token.credentials)
@@ -33,13 +35,13 @@ def _get_recruiter_context(token: HTTPAuthorizationCredentials = Depends(securit
             detail="Token is invalid or has expired. Please log in again.",
         )
 
-    recruiter_id = payload.get("recruiter_id")
-    company_id = payload.get("company_id")
+    recruiter_id = payload.get("recruiter_id")   # None for company tokens
+    company_id   = payload.get("company_id")
 
-    if not recruiter_id or not company_id:
+    if not company_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Access denied. Please log in as a Recruiter.",
+            detail="Token is invalid. Please log in again.",
         )
 
     return {"recruiter_id": recruiter_id, "company_id": company_id}
