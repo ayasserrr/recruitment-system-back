@@ -32,3 +32,4 @@ from models.db.hr_interview_score import HRInterviewScore
 from models.db.hr_interview_report import HRInterviewReport
 from models.db.final_ranking import FinalRanking
 from models.db.pipeline_stage_log import PipelineStageLog
+from models.db.company_social_auth import CompanySocialAuth

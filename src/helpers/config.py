@@ -17,6 +17,13 @@ class settings(BaseSettings):
 
     OPENAI_API_KEY: str = ""
 
+    LINKEDIN_CLIENT_ID: str = ""
+    LINKEDIN_CLIENT_SECRET: str = ""
+    LINKEDIN_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
+
+    # Celery / Redis
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

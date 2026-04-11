@@ -18,3 +18,8 @@ python-jose[cryptography] == 3.3.0
 openai >= 1.30.0
 langgraph >= 0.2.0
 langchain-openai >= 0.1.0
+
+# Celery — task queue (worker + beat scheduler)
+celery[redis] >= 5.3.0
+# Redis client used by Celery as broker and result backend
+redis >= 5.0.0

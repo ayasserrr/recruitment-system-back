@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from routes import base_router, data_router, rank_router, job_requisitions_router
 from routes.auth import router as auth_router
 from routes.recruiter_auth import router as recruiter_auth_router
+from routes.linkedin_auth import router as linkedin_auth_router
 from database.connection import engine, Base
 import models.db
 
@@ -64,6 +65,7 @@ def startup():
 # Include routers
 app.include_router(auth_router)
 app.include_router(recruiter_auth_router)
+app.include_router(linkedin_auth_router)
 app.include_router(base_router)
 app.include_router(data_router)
 app.include_router(rank_router)
