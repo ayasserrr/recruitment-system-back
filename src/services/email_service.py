@@ -1,0 +1,155 @@
+"""
+Async email notification service.
+
+Uses Python's built-in smtplib via anyio.to_thread so the blocking SMTP
+call never holds up the LangGraph execution or the Celery worker thread.
+
+Usage
+─────
+    from services.email_service import send_post_live_notification
+    send_post_live_notification(
+        recipient_email="hr@company.com",
+        recipient_name="Sara",
+        job_title="Senior Python Engineer",
+        apply_url="http://localhost:3000/apply?cid=1&jid=5",
+    )
+
+The function is fire-and-forget — it spawns a daemon thread and returns
+immediately.  Any SMTP failure is logged as a warning, never raised.
+"""
+
+import logging
+import smtplib
+import threading
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from helpers.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+# ── Email builder ─────────────────────────────────────────────────────────────
+
+def _build_message(
+    recipient_email: str,
+    recipient_name: str,
+    job_title: str,
+    apply_url: str,
+) -> MIMEMultipart:
+    cfg = get_settings()
+    sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "🚀 Your Job Requisition is now LIVE!"
+    msg["From"] = sender
+    msg["To"] = recipient_email
+
+    plain = (
+        f"Hello {recipient_name},\n\n"
+        f"We are happy to inform you that your job post for \"{job_title}\" "
+        f"has been successfully published to LinkedIn.\n\n"
+        f"Candidates can now apply via the link below, and the AI will begin "
+        f"processing incoming CVs immediately. You can track the progress in "
+        f"your dashboard.\n\n"
+        f"Apply link: {apply_url}\n\n"
+        f"Best regards,\n"
+        f"{cfg.SMTP_FROM_NAME}"
+    )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
+        <h2 style="color: #2563eb;">🚀 Your Job Post is LIVE!</h2>
+        <p>Hello <strong>{recipient_name}</strong>,</p>
+        <p>
+          We are happy to inform you that your job post for
+          <strong>"{job_title}"</strong> has been successfully published to
+          <strong>LinkedIn</strong>.
+        </p>
+        <p>
+          Candidates can now apply via the link below, and the AI pipeline will
+          begin processing incoming CVs immediately. You can track the progress
+          in your dashboard.
+        </p>
+        <p style="margin: 24px 0;">
+          <a href="{apply_url}"
+             style="background:#2563eb;color:#fff;padding:12px 24px;
+                    border-radius:6px;text-decoration:none;font-weight:bold;">
+            View Application Link
+          </a>
+        </p>
+        <p style="color:#666;font-size:13px;">
+          This is an automated message from {cfg.SMTP_FROM_NAME}.
+        </p>
+      </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(html, "html"))
+    return msg
+
+
+# ── SMTP sender (blocking — runs in a background thread) ──────────────────────
+
+def _send(
+    recipient_email: str,
+    recipient_name: str,
+    job_title: str,
+    apply_url: str,
+) -> None:
+    cfg = get_settings()
+
+    if not cfg.SMTP_USER or not cfg.SMTP_PASSWORD:
+        logger.warning(
+            "[email] SMTP_USER or SMTP_PASSWORD not configured — "
+            "skipping notification for '%s' → %s",
+            job_title, recipient_email,
+        )
+        return
+
+    try:
+        msg = _build_message(
+            recipient_email=recipient_email,
+            recipient_name=recipient_name,
+            job_title=job_title,
+            apply_url=apply_url,
+        )
+        with smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(cfg.SMTP_USER, cfg.SMTP_PASSWORD)
+            server.sendmail(cfg.SMTP_USER, recipient_email, msg.as_string())
+
+        logger.info(
+            "[email] Post-live notification sent to %s for job '%s'.",
+            recipient_email, job_title,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[email] Failed to send notification to %s: %s",
+            recipient_email, exc,
+        )
+
+
+# ── Public API — fire-and-forget ──────────────────────────────────────────────
+
+def send_post_live_notification(
+    recipient_email: str,
+    recipient_name: str,
+    job_title: str,
+    apply_url: str,
+) -> None:
+    """
+    Send a 'your job is live' email without blocking the caller.
+
+    Spawns a daemon thread so LangGraph / Celery execution continues
+    immediately.  SMTP errors are caught and logged — never raised.
+    """
+    threading.Thread(
+        target=_send,
+        args=(recipient_email, recipient_name, job_title, apply_url),
+        daemon=True,
+        name=f"email-{recipient_email[:20]}",
+    ).start()

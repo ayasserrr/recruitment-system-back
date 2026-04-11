@@ -120,6 +120,34 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+# ── POST /{id}/retry ───────────────────────────────────────────────────────
+
+@router.post(
+    "/{requisition_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Re-trigger the recruitment pipeline for a requisition",
+)
+def retry_pipeline(
+    requisition_id: int,
+    ctx: dict = Depends(_get_recruiter_context),
+    db: Session = Depends(get_db),
+):
+    from agents.runner import trigger_pipeline
+
+    try:
+        req = get_requisition_for_recruiter(requisition_id, ctx["recruiter_id"], db)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this requisition.",
+        )
+
+    trigger_pipeline(req.requisition_id)
+    return {"detail": f"Pipeline re-triggered for requisition {requisition_id}."}
+
+
 @router.patch(
     "/{requisition_id}/status",
     response_model=JobRequisitionResponse,

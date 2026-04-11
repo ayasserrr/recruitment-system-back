@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from routes import base_router, data_router, rank_router, job_requisitions_router
+from routes import base_router, data_router, rank_router, job_requisitions_router, candidates_router
 from routes.auth import router as auth_router
 from routes.recruiter_auth import router as recruiter_auth_router
 from routes.linkedin_auth import router as linkedin_auth_router
@@ -70,6 +70,7 @@ app.include_router(base_router)
 app.include_router(data_router)
 app.include_router(rank_router)
 app.include_router(job_requisitions_router)
+app.include_router(candidates_router)
 
 @app.get("/")
 def root():

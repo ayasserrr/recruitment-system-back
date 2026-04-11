@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 from openai import OpenAI
 
 from helpers.config import get_settings
@@ -7,6 +9,16 @@ from agents.state import PipelineState
 
 logger   = logging.getLogger(__name__)
 settings = get_settings()
+
+# Hard limit on how much of long free-text fields we feed into the prompt.
+# LinkedIn posts are 150-250 words; the model only needs the gist.
+_MAX_DESC_CHARS = 500
+
+
+def _truncate(text: str | None, limit: int = _MAX_DESC_CHARS) -> str:
+    if not text:
+        return "Not specified"
+    return text[:limit] + "…" if len(text) > limit else text
 
 
 def _build_prompt(jr: dict) -> str:
@@ -24,8 +36,7 @@ def _build_prompt(jr: dict) -> str:
         else "Not specified"
     )
 
-    return f"""
-Generate job posts for the following position for TWO platforms: LinkedIn and Indeed.
+    return f"""Generate TWO short job posts (LinkedIn and Indeed) for the position below.
 
 JOB DETAILS:
 - Title: {jr['job_title']}
@@ -39,31 +50,62 @@ JOB DETAILS:
 - Preferred Skills: {preferred_text}
 - Salary: {salary_text}
 - Application Deadline: {jr['deadline'] or 'Open'}
-- Key Responsibilities: {jr['key_responsibilities'] or 'Not specified'}
-- Full Description: {jr['full_description'] or 'Not specified'}
+- Key Responsibilities: {_truncate(jr['key_responsibilities'])}
+- Description: {_truncate(jr['full_description'])}
 
-PLATFORM REQUIREMENTS:
+RULES — you MUST follow these exactly:
+1. LinkedIn post: 150-200 words, professional tone, paragraphs only (no bullet points), end with 3-5 hashtags on one line.
+2. Indeed post: 120-160 words, direct tone, use bullet points for requirements.
+3. Both "content" values must be plain text strings — no nested JSON, no code blocks.
+4. Return ONLY the JSON object below, nothing else before or after it.
 
-LINKEDIN POST:
-- Tone: Professional, engaging, inspiring
-- Length: 150-250 words
-- Include: growth opportunity, 3-5 relevant hashtags at the end
-- Format: Paragraphs (no bullet points)
-- Title: Eye-catching hiring announcement
+{{"linkedin": {{"title": "...", "content": "..."}}, "indeed": {{"title": "...", "content": "..."}}}}"""
 
-INDEED POST:
-- Tone: Direct, clear, benefit-focused
-- Length: 120-180 words
-- Include: Clear requirements, salary range, bullet points
-- Format: Use bullet points
-- Title: Standard job title format
 
-Return ONLY this JSON, no extra text:
-{{
-  "linkedin": {{ "title": "...", "content": "..." }},
-  "indeed":   {{ "title": "...", "content": "..." }}
-}}
-"""
+def _extract_json(raw: str) -> dict:
+    """
+    Robustly extract the JSON object from the model response.
+
+    Strategy (tried in order):
+      1. Direct json.loads on the stripped string.
+      2. Find the outermost {{ }} pair and parse that slice — handles
+         cases where the model adds preamble/postamble text.
+      3. If the object is truncated, close all open braces/brackets and
+         retry — handles max_tokens cut-off.
+    """
+    text = raw.strip()
+
+    # Strategy 1 — clean response
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2 — extract outermost { }
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3 — truncated JSON: close unclosed braces/strings
+    if start != -1:
+        fragment = text[start:]
+        # Close any open string by appending a quote if we're mid-string
+        open_strings = fragment.count('"') % 2
+        if open_strings:
+            fragment += '"'
+        # Count unclosed braces
+        depth = fragment.count("{") - fragment.count("}")
+        fragment += "}" * max(depth, 0)
+        try:
+            return json.loads(fragment)
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Cannot extract valid JSON from model response. Raw (first 300 chars): {raw[:300]}")
 
 
 def generate_posts(state: PipelineState) -> PipelineState:
@@ -81,27 +123,40 @@ def generate_posts(state: PipelineState) -> PipelineState:
                 {
                     "role": "system",
                     "content": (
-                        "You are an expert HR copywriter who crafts compelling job posts "
-                        "optimized for each platform's audience and tone. "
-                        "Always respond with valid JSON matching the exact schema provided."
+                        "You are an expert HR copywriter. "
+                        "Always respond with a single compact JSON object. "
+                        "Keep posts concise: LinkedIn 150-200 words, Indeed 120-160 words. "
+                        "Never add text outside the JSON."
                     ),
                 },
                 {"role": "user", "content": _build_prompt(state["jr_data"])},
             ],
             temperature=0.7,
+            max_tokens=2048,
         )
 
         raw_json = response.choices[0].message.content
-        parsed   = GeneratedPosts.model_validate_json(raw_json)
+
+        # Log finish reason so truncation is visible in the logs
+        finish_reason = response.choices[0].finish_reason
+        if finish_reason != "stop":
+            logger.warning(
+                "[generate_posts] Unexpected finish_reason='%s' for requisition %s — "
+                "response may be truncated.",
+                finish_reason, state["requisition_id"],
+            )
+
+        data   = _extract_json(raw_json)
+        parsed = GeneratedPosts.model_validate(data)
 
         generated_posts = {
             "linkedin": {"title": parsed.linkedin.title, "content": parsed.linkedin.content},
             "indeed":   {"title": parsed.indeed.title,   "content": parsed.indeed.content},
         }
 
-        logger.info(f"[generate_posts] Posts generated for requisition {state['requisition_id']}")
+        logger.info("[generate_posts] Posts generated for requisition %s", state["requisition_id"])
         return {**state, "generated_posts": generated_posts}
 
     except Exception as e:
-        logger.error(f"[generate_posts] Error: {e}")
+        logger.error("[generate_posts] Error: %s", e)
         return {**state, "current_phase": "error", "error": str(e)}

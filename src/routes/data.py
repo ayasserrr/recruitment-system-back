@@ -91,7 +91,20 @@ async def upload_data(
             },
         )
 
-    # 5. Success Response
+    # 5. Auto-trigger text extraction (Processing API)
+    try:
+        await process_controller.extract_candidate_text(
+            company_id=company_id,
+            job_id=job_id,
+            candidate_id=candidate_id,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Auto-processing trigger failed for {company_id}/{job_id}/{candidate_id}: {e}"
+        )
+        # Non-fatal: CV was uploaded and parsed; processing can be retried manually.
+
+    # 6. Success Response
     return JSONResponse(
         status_code=status.HTTP_201_CREATED,
         content={

@@ -15,6 +15,7 @@ Flow:
 
 import os
 import secrets
+import threading
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 from database.connection import get_db
 from helpers.auth_helper import verify_token, SECRET_KEY, ALGORITHM
 from models.db.company_social_auth import CompanySocialAuth
+from models.db.job_requisition import JobRequisition
 
 router = APIRouter(prefix="/api/v1/auth/linkedin", tags=["linkedin-oauth"])
 security = HTTPBearer()
@@ -301,6 +303,49 @@ def disconnect_linkedin(
     db.commit()
 
     return {"message": "LinkedIn account unlinked successfully."}
+
+
+@router.post("/republish/{requisition_id}", status_code=status.HTTP_202_ACCEPTED)
+def republish_to_linkedin(
+    requisition_id: int,
+    token: str = Depends(security),
+    db: Session = Depends(get_db),
+):
+    """
+    Re-publish an existing job requisition to LinkedIn.
+    Use this when a post was published before an update (e.g. an apply link
+    was added) and needs to be re-sent.
+
+    Runs the LinkedIn publishing graph in a background thread and returns
+    immediately. A new post will appear on LinkedIn — the previous one is
+    NOT deleted automatically (LinkedIn does not expose a delete API for
+    w_member_social scope).
+    """
+    from services.linkedin_graph import run_linkedin_publishing_graph
+
+    company_id = _extract_company_id(token.credentials)
+
+    jr = db.query(JobRequisition).filter(
+        JobRequisition.requisition_id == requisition_id,
+        JobRequisition.company_id == company_id,
+    ).first()
+
+    if not jr:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Requisition {requisition_id} not found for this company.",
+        )
+
+    threading.Thread(
+        target=run_linkedin_publishing_graph,
+        args=(requisition_id, company_id),
+        daemon=True,
+        name=f"republish-{requisition_id}",
+    ).start()
+
+    return {
+        "detail": f"Re-publishing requisition {requisition_id} to LinkedIn in the background."
+    }
 
 
 @router.patch("/organization")

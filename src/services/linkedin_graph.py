@@ -7,21 +7,38 @@ context_loader
     Fetches the company's LinkedIn credentials (access_token,
     organization_id) from company_social_auth and the generated post
     content from posting_platforms (platform_name = 'LinkedIn').
+    Appends the dynamic application URL to the post content.
     Short-circuits to finalizer on any error so the DB is always updated.
 
+preflight_check  ← SAFETY GUARD
+    Runs AFTER context_loader, BEFORE the LinkedIn API call.
+    Validates three hard requirements:
+      1. company_id is a positive integer that exists in the DB.
+      2. jr_id (job_id) is a positive integer that exists in the DB.
+      3. post_content contains the correctly-formed apply URL
+         (/apply?cid=<company_id>&jid=<jr_id>), proving the link was
+         injected — not just that APP_BASE_URL is set.
+    On ANY failure:
+      • Sets state["error"] and state["preflight_failed"] = True.
+      • Routes straight to finalizer, which SKIPS all DB status writes
+        (JR stays "Active") so Celery can retry once the issue is fixed.
+
 api_publisher
-    Calls the LinkedIn UGC Posts API.
+    Calls the LinkedIn REST Posts API.
     Handles expired-token detection and other API errors explicitly —
     these are surfaced as state["error"] rather than raised exceptions,
     because retrying with a bad token is pointless.
 
 finalizer
-    Writes the outcome back to the database:
-      • success → JobRequisition.status = 'published'
-                  PostingPlatform.posted_at  = utcnow()
-                  PostingPlatform.status     = 'Published'
-      • failure → JobRequisition.status = 'failed'
-                  PostingPlatform.status     = 'Failed'
+    Writes the outcome back to the database.
+
+    preflight_failed = True  → NO DB writes; logs an actionable error.
+                               JR stays "Active" so Celery retries.
+    success = True           → JobRequisition.status = 'published'
+                               PostingPlatform.status = 'Published'
+                               PostingPlatform.posted_at = utcnow()
+    success = False          → JobRequisition.status = 'failed'
+                               PostingPlatform.status = 'Failed'
 
 State
 ─────
@@ -38,9 +55,13 @@ import httpx
 from langgraph.graph import END, StateGraph
 
 from database.connection import SessionLocal
+from helpers.config import get_settings
+from models.db.company import Company
 from models.db.company_social_auth import CompanySocialAuth
 from models.db.job_requisition import JobRequisition
 from models.db.posting_platform import PostingPlatform
+from models.db.recruiter import Recruiter
+from services.email_service import send_post_live_notification
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +82,8 @@ class LinkedInPublishState(TypedDict):
     post_content: Optional[str]
     # set by any node on error; checked by finalizer
     error: Optional[str]
+    # True when preflight_check fails — finalizer must NOT touch DB status
+    preflight_failed: bool
     # set True by api_publisher on HTTP 201
     success: bool
 
@@ -160,24 +183,126 @@ def context_loader(state: LinkedInPublishState) -> LinkedInPublishState:
                 "success": False,
             }
 
+        # ── append application link ───────────────────────────────────────────
+        app_base_url = get_settings().APP_BASE_URL.rstrip("/")
+        apply_url = f"{app_base_url}/apply?cid={company_id}&jid={jr_id}"
+        post_content = (
+            f"{platform.platform_post_content}\n\n"
+            f"Apply now: {apply_url}"
+        )
+
         logger.info(
             "[context_loader] Credentials and content loaded for JR %s (company=%s). "
-            "Author: %s",
-            jr_id, company_id, author_urn,
+            "Author: %s | Apply URL: %s",
+            jr_id, company_id, author_urn, apply_url,
         )
         return {
             **state,
             "access_token": social_auth.linkedin_access_token,
             "author_urn": author_urn,
             "organization_id": social_auth.linkedin_organization_id,
-            "post_content": platform.platform_post_content,
+            "post_content": post_content,
         }
 
     finally:
         db.close()
 
 
-# ── Node 2: API Publisher ─────────────────────────────────────────────────────
+# ── Node 2: Preflight Check (Safety Guard) ────────────────────────────────────
+
+def preflight_check(state: LinkedInPublishState) -> LinkedInPublishState:
+    """
+    Safety guard — runs AFTER context_loader, BEFORE the LinkedIn API call.
+
+    Hard requirements (all three must pass):
+      1. company_id > 0  AND  the company row exists in the DB.
+      2. jr_id > 0  AND  the job requisition row exists in the DB.
+      3. post_content contains the exact apply URL pattern
+         '/apply?cid=<company_id>&jid=<jr_id>', confirming the link was
+         injected by context_loader with the correct IDs.
+
+    Failure behaviour
+    ─────────────────
+    Sets preflight_failed = True so the finalizer knows to leave the JR
+    status untouched (stays 'Active').  The Celery beat will retry the
+    task on its next tick once the underlying issue is resolved — no
+    manual reset needed.
+    """
+    jr_id = state["jr_id"]
+    company_id = state["company_id"]
+    post_content = state.get("post_content") or ""
+
+    # ── 1. company_id sanity ──────────────────────────────────────────────────
+    if not isinstance(company_id, int) or company_id <= 0:
+        msg = (
+            f"[preflight] BLOCKED — company_id '{company_id}' is not a valid positive integer."
+        )
+        logger.error(msg)
+        return {**state, "error": msg, "preflight_failed": True, "success": False}
+
+    # ── 2. jr_id sanity ──────────────────────────────────────────────────────
+    if not isinstance(jr_id, int) or jr_id <= 0:
+        msg = (
+            f"[preflight] BLOCKED — jr_id '{jr_id}' is not a valid positive integer."
+        )
+        logger.error(msg)
+        return {**state, "error": msg, "preflight_failed": True, "success": False}
+
+    db = SessionLocal()
+    try:
+        # ── 3. company exists in DB ───────────────────────────────────────────
+        company_exists = (
+            db.query(Company.company_id)
+            .filter(Company.company_id == company_id)
+            .first()
+        )
+        if not company_exists:
+            msg = (
+                f"[preflight] BLOCKED — company_id {company_id} does not exist in the database."
+            )
+            logger.error(msg)
+            return {**state, "error": msg, "preflight_failed": True, "success": False}
+
+        # ── 4. job requisition exists in DB ──────────────────────────────────
+        jr_exists = (
+            db.query(JobRequisition.requisition_id)
+            .filter(
+                JobRequisition.requisition_id == jr_id,
+                JobRequisition.company_id == company_id,
+            )
+            .first()
+        )
+        if not jr_exists:
+            msg = (
+                f"[preflight] BLOCKED — requisition {jr_id} does not exist "
+                f"or does not belong to company {company_id}."
+            )
+            logger.error(msg)
+            return {**state, "error": msg, "preflight_failed": True, "success": False}
+
+    finally:
+        db.close()
+
+    # ── 5. apply URL is present in post content ───────────────────────────────
+    expected_url_fragment = f"/apply?cid={company_id}&jid={jr_id}"
+    if expected_url_fragment not in post_content:
+        msg = (
+            f"[preflight] BLOCKED — apply URL '{expected_url_fragment}' is missing from "
+            f"the post content for JR {jr_id}. "
+            "Ensure APP_BASE_URL is set in .env and the Celery worker was restarted "
+            "after the link-injection code was deployed."
+        )
+        logger.error(msg)
+        return {**state, "error": msg, "preflight_failed": True, "success": False}
+
+    logger.info(
+        "[preflight] All checks passed for JR %s (company=%s). Proceeding to publish.",
+        jr_id, company_id,
+    )
+    return state
+
+
+# ── Node 3: API Publisher ─────────────────────────────────────────────────────
 
 def api_publisher(state: LinkedInPublishState) -> LinkedInPublishState:
     """
@@ -269,28 +394,115 @@ def api_publisher(state: LinkedInPublishState) -> LinkedInPublishState:
     return {**state, "error": error_msg, "success": False}
 
 
-# ── Node 3: Finalizer ─────────────────────────────────────────────────────────
+# ── Email helper ─────────────────────────────────────────────────────────────
+
+def _notify_recruiter(jr: JobRequisition, db) -> None:
+    """
+    Resolve the best recipient email for a published JR and fire the
+    post-live notification in a background thread.
+
+    Resolution order
+    ────────────────
+    1. jr.contact_email  — explicit contact set on the requisition (primary)
+    2. recruiter.email   — the recruiter who owns the JR
+    3. company.email     — the company account email (last resort)
+    """
+    recipient_email: Optional[str] = None
+    recipient_name: str = "HR Team"
+
+    # 1. contact_email on the JR (primary — set explicitly by the recruiter)
+    if jr.contact_email:
+        recipient_email = jr.contact_email
+        # Try to get a name from the recruiter to personalise the greeting
+        if jr.recruiter_id:
+            recruiter: Optional[Recruiter] = (
+                db.query(Recruiter)
+                .filter(Recruiter.recruiter_id == jr.recruiter_id)
+                .first()
+            )
+            if recruiter:
+                recipient_name = f"{recruiter.first_name} {recruiter.last_name}".strip()
+
+    # 2. Recruiter email
+    if not recipient_email and jr.recruiter_id:
+        recruiter = (
+            db.query(Recruiter)
+            .filter(Recruiter.recruiter_id == jr.recruiter_id)
+            .first()
+        )
+        if recruiter and recruiter.email:
+            recipient_email = recruiter.email
+            recipient_name = f"{recruiter.first_name} {recruiter.last_name}".strip()
+
+    # 3. Company account email
+    if not recipient_email:
+        company: Optional[Company] = (
+            db.query(Company)
+            .filter(Company.company_id == jr.company_id)
+            .first()
+        )
+        if company and company.email:
+            recipient_email = company.email
+            recipient_name = company.name or recipient_name
+
+    if not recipient_email:
+        logger.warning(
+            "[finalizer] No recipient email found for JR %s — skipping notification.",
+            jr.requisition_id,
+        )
+        return
+
+    app_base_url = get_settings().APP_BASE_URL.rstrip("/")
+    apply_url = f"{app_base_url}/apply?cid={jr.company_id}&jid={jr.requisition_id}"
+
+    logger.info(
+        "[finalizer] Sending post-live notification for JR %s ('%s') → %s",
+        jr.requisition_id, jr.job_title, recipient_email,
+    )
+    send_post_live_notification(
+        recipient_email=recipient_email,
+        recipient_name=recipient_name,
+        job_title=jr.job_title,
+        apply_url=apply_url,
+    )
+
+
+# ── Node 4: Finalizer ─────────────────────────────────────────────────────────
 
 def finalizer(state: LinkedInPublishState) -> LinkedInPublishState:
     """
     Persist the publishing outcome to the database.
 
-    Success path
-    ────────────
-      JobRequisition.status       = 'published'
-      PostingPlatform.status      = 'Published'
-      PostingPlatform.posted_at   = utcnow()
+    preflight_failed = True
+        → NO DB writes at all.  JR status stays 'Active' so the Celery
+          beat retries automatically once the configuration issue is fixed.
+          The error is logged at ERROR level with a clear action item.
 
-    Failure path
-    ────────────
-      JobRequisition.status       = 'failed'
-      PostingPlatform.status      = 'Failed'
+    success = True
+        → JobRequisition.status       = 'published'
+           PostingPlatform.status      = 'Published'
+           PostingPlatform.posted_at   = utcnow()
+
+    success = False  (API / network error)
+        → JobRequisition.status       = 'failed'
+           PostingPlatform.status      = 'Failed'
     """
     jr_id = state["jr_id"]
     success = state.get("success", False)
     error = state.get("error")
-    now = datetime.utcnow()
+    preflight_failed = state.get("preflight_failed", False)
 
+    # ── preflight failure: do not touch DB, surface a loud actionable log ─────
+    if preflight_failed:
+        logger.error(
+            "[finalizer] PREFLIGHT GUARD — publishing ABORTED for JR %s. "
+            "JR status left unchanged (Active). Fix the issue and let Celery retry. "
+            "Reason: %s",
+            jr_id, error,
+        )
+        return state
+
+    now = datetime.utcnow()
     db = SessionLocal()
     try:
         jr: Optional[JobRequisition] = (
@@ -318,6 +530,15 @@ def finalizer(state: LinkedInPublishState) -> LinkedInPublishState:
                 platform.status = "Published"
                 platform.posted_at = now
             logger.info("[finalizer] JR %s marked as published.", jr_id)
+
+            # ── fire post-live email notification ─────────────────────────────
+            try:
+                _notify_recruiter(jr=jr, db=db)
+            except Exception:
+                logger.warning(
+                    "[finalizer] Could not send email notification for JR %s.",
+                    jr_id, exc_info=True,
+                )
         else:
             jr.status = "failed"
             if platform:
@@ -338,8 +559,13 @@ def finalizer(state: LinkedInPublishState) -> LinkedInPublishState:
 # ── Routing helpers ───────────────────────────────────────────────────────────
 
 def _route_after_loader(state: LinkedInPublishState) -> str:
-    """Skip api_publisher and go straight to finalizer if context loading failed."""
-    return "finalizer" if state.get("error") else "api_publisher"
+    """Skip preflight+publisher and go straight to finalizer if context loading failed."""
+    return "finalizer" if state.get("error") else "preflight_check"
+
+
+def _route_after_preflight(state: LinkedInPublishState) -> str:
+    """Block the API call and go to finalizer if any preflight check failed."""
+    return "finalizer" if state.get("preflight_failed") else "api_publisher"
 
 
 # ── Graph builder ─────────────────────────────────────────────────────────────
@@ -348,6 +574,7 @@ def _build_graph() -> object:
     graph = StateGraph(LinkedInPublishState)
 
     graph.add_node("context_loader", context_loader)
+    graph.add_node("preflight_check", preflight_check)
     graph.add_node("api_publisher", api_publisher)
     graph.add_node("finalizer", finalizer)
 
@@ -356,6 +583,15 @@ def _build_graph() -> object:
     graph.add_conditional_edges(
         "context_loader",
         _route_after_loader,
+        {
+            "preflight_check": "preflight_check",
+            "finalizer": "finalizer",
+        },
+    )
+
+    graph.add_conditional_edges(
+        "preflight_check",
+        _route_after_preflight,
         {
             "api_publisher": "api_publisher",
             "finalizer": "finalizer",
@@ -394,6 +630,7 @@ def run_linkedin_publishing_graph(jr_id: int, company_id: int) -> LinkedInPublis
         "organization_id": None,
         "post_content": None,
         "error": None,
+        "preflight_failed": False,
         "success": False,
     }
 
@@ -404,8 +641,9 @@ def run_linkedin_publishing_graph(jr_id: int, company_id: int) -> LinkedInPublis
     )
     result: LinkedInPublishState = _compiled_graph.invoke(initial_state)
     logger.info(
-        "[linkedin_graph] Graph finished for JR %s — success=%s.",
+        "[linkedin_graph] Graph finished for JR %s — success=%s, preflight_failed=%s.",
         jr_id,
         result.get("success"),
+        result.get("preflight_failed"),
     )
     return result

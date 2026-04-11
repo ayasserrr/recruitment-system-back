@@ -21,6 +21,16 @@ class settings(BaseSettings):
     LINKEDIN_CLIENT_SECRET: str = ""
     LINKEDIN_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
 
+    # Application base URL — used to build candidate application links
+    APP_BASE_URL: str = "https://yourdomain.com"
+
+    # SMTP — email notifications
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM_NAME: str = "Recruitment System"
+
     # Celery / Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

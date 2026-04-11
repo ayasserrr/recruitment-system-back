@@ -13,15 +13,31 @@ class DataController(BaseController):
     def __init__(self):
         super().__init__()
 
-    async def validate_uploaded_file(self, file: UploadFile):
-        if file.content_type not in self.app_settings.FILE_ALLOWED_TYPES:
-            return False, ResponseSignal.FILE_TYPE_NOT_ALLOWED.value
+    # MIME types that browsers may report for PDF/text files.
+    # application/octet-stream is a common fallback sent by browsers and
+    # upload libraries even for valid PDFs — extension is the reliable check.
+    _ACCEPTED_MIME_TYPES = {
+        "application/pdf",
+        "text/plain",
+        "application/octet-stream",   # generic binary — extension decides
+        "application/force-download", # some browsers use this for PDFs
+        "binary/octet-stream",
+    }
 
+    async def validate_uploaded_file(self, file: UploadFile):
         if not file.filename:
             return False, ResponseSignal.FILE_TYPE_NOT_ALLOWED.value
 
         filename_lower = file.filename.lower()
         if not (filename_lower.endswith(".pdf") or filename_lower.endswith(".txt")):
+            return False, ResponseSignal.FILE_TYPE_NOT_ALLOWED.value
+
+        # Accept any MIME type that is either explicitly allowed or a generic
+        # binary fallback — extension check above is the real gate.
+        if (
+            file.content_type
+            and file.content_type not in self._ACCEPTED_MIME_TYPES
+        ):
             return False, ResponseSignal.FILE_TYPE_NOT_ALLOWED.value
             
         # Get file size by reading the file content
