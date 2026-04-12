@@ -1,10 +1,13 @@
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from typing import Optional
 
-from database.connection import SessionLocal
+from database.connection import get_db
 from models.db.candidate import Candidate
+from routes.jobs import check_job_deadline
 
 candidates_router = APIRouter(
     prefix="/api/v1/candidates",
@@ -17,6 +20,7 @@ class CandidateRegisterRequest(BaseModel):
     first_name: str = Field(default="", alias="firstName")
     last_name: str = Field(default="", alias="lastName")
     email: str
+    requisition_id: Optional[int] = Field(default=None, alias="requisitionId")
 
     model_config = {"populate_by_name": True}
 
@@ -38,14 +42,19 @@ class CandidateRegisterRequest(BaseModel):
 
 @candidates_router.post("", status_code=status.HTTP_201_CREATED)
 @candidates_router.post("/register", status_code=status.HTTP_201_CREATED)
-def register_candidate(body: CandidateRegisterRequest):
+def register_candidate(body: CandidateRegisterRequest, db: Session = Depends(get_db)):
     """
     Register a new candidate (Name + Email) and return the candidate_id.
+
+    Optionally accepts requisitionId — if provided, validates that the job is
+    still accepting applications before creating the record.
 
     The candidate_id is required for the subsequent CV upload step:
       POST /api/v1/data/upload/{company_id}/{job_id}/{candidate_id}
     """
-    db = SessionLocal()
+    # Deadline guard — runs before any DB write
+    if body.requisition_id is not None:
+        check_job_deadline(body.requisition_id, db)
     try:
         candidate = Candidate(
             first_name=body.first_name,
@@ -87,5 +96,3 @@ def register_candidate(body: CandidateRegisterRequest):
             status_code=status.HTTP_409_CONFLICT,
             content={"detail": "A candidate with this email already exists."},
         )
-    finally:
-        db.close()

@@ -10,6 +10,7 @@ from controllers import CompanyController, DataController, ProcessController
 from database.connection import get_db
 from models import ResponseSignal
 from services import CVPersistenceService
+from routes.jobs import check_job_deadline
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -28,6 +29,13 @@ async def upload_data(
     db: Session = Depends(get_db),
 ):
     
+    # Reject submissions past the cv_collection_end_date
+    try:
+        requisition_id = int(job_id)
+        check_job_deadline(requisition_id, db)
+    except ValueError:
+        pass  # job_id is not a DB requisition_id — skip deadline check
+
     # Initialize Controller
     data_controller = DataController()
     
