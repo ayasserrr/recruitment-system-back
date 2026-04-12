@@ -4,9 +4,12 @@ import aiofiles
 import logging
 import json
 from pathlib import Path
+from sqlalchemy.orm import Session
 from helpers import get_settings, settings
 from controllers import CompanyController, DataController, ProcessController
+from database.connection import get_db
 from models import ResponseSignal
+from services import CVPersistenceService
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -22,6 +25,7 @@ async def upload_data(
     candidate_id: str,
     file: UploadFile,
     app_settings: settings = Depends(get_settings),
+    db: Session = Depends(get_db),
 ):
     
     # Initialize Controller
@@ -81,6 +85,20 @@ async def upload_data(
 
         async with aiofiles.open(cv_json_path, "w", encoding="utf-8") as f:
             await f.write(json.dumps(cv_json, ensure_ascii=False, indent=2))
+
+        # Persist parsed CV data to database.
+        # candidate_id path param is the DB integer assigned at registration.
+        try:
+            registered_id = int(candidate_id)
+        except (ValueError, TypeError):
+            registered_id = None
+
+        db_candidate_id, db_cv_id = CVPersistenceService().persist(
+            cv_json=cv_json,
+            db=db,
+            file_url=str(file_path),
+            registered_candidate_id=registered_id,
+        )
     except Exception as e:
         logger.error(f"Error processing CV JSON for {company_id}/{job_id}/{candidate_id}: {e}")
         return JSONResponse(
@@ -112,6 +130,8 @@ async def upload_data(
             "file_id": file_id,
             "cv_json_path": str(cv_json_path),
             "cv_json": cv_json,
+            "db_candidate_id": db_candidate_id,
+            "db_cv_id": db_cv_id,
         }
     )
 
