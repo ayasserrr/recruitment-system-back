@@ -5,17 +5,28 @@ Beat schedule
 ─────────────
 • scan_and_dispatch_scheduled_posts — runs every 60 s
   Scans job_requisitions for rows where:
-    status == 'scheduled'  AND  posting_start_date <= today
+    status == 'Active'  AND  posting_start_date <= today
   Then fires one process_linkedin_publishing task per match.
+
+• scan_and_dispatch_cv_ranking — runs every 5 minutes
+  Scans job_requisitions for rows where:
+    cv_collection_end_date <= today  AND  status IN ('published','Active','failed')
+  Then fires one process_cv_ranking task per match.
+  After a successful rank run the worker sets status = 'ranked' so this
+  scanner never re-triggers the same job.
 
 Workers
 ───────
 • process_linkedin_publishing(jr_id, company_id)
-  Executes the LangGraph publishing workflow for a single job requisition.
+  Executes the LangGraph LinkedIn publishing workflow.
+
+• process_cv_ranking(requisition_id)
+  Executes the LangGraph AI ranking pipeline (GPT-4o-mini, pool-relative
+  labels, upserts semantic_analysis_reports + SemanticMatchedSkill).
 
 Run commands
 ────────────
-  # Worker
+  # Worker  (handles both task modules)
   celery -A core.celery worker --loglevel=info
 
   # Beat scheduler  (separate process)
@@ -31,7 +42,10 @@ celery_app = Celery(
     "recruitment_system",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.social_tasks"],
+    include=[
+        "tasks.social_tasks",
+        "tasks.ranking_tasks",   # ← CV ranking automation
+    ],
 )
 
 celery_app.conf.update(
@@ -47,8 +61,14 @@ celery_app.conf.update(
 
 # ── Periodic tasks (Celery Beat) ──────────────────────────────────────────────
 celery_app.conf.beat_schedule = {
+    # LinkedIn post publishing — checked every minute (posting windows matter)
     "scan-scheduled-posts-every-minute": {
         "task": "tasks.social_tasks.scan_and_dispatch_scheduled_posts",
-        "schedule": 60.0,  # seconds
+        "schedule": 60.0,
+    },
+    # CV ranking — checked every 5 minutes (deadlines are date-based, not time-based)
+    "scan-cv-ranking-deadlines-every-5-minutes": {
+        "task": "tasks.ranking_tasks.scan_and_dispatch_cv_ranking",
+        "schedule": 300.0,
     },
 }
