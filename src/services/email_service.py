@@ -133,6 +133,110 @@ def _send(
         )
 
 
+# ── Shortlist notification ─────────────────────────────────────────────────────
+
+def _build_shortlist_message(
+    recipient_email: str,
+    first_name: str,
+    job_title: str,
+    company_name: str,
+) -> MIMEMultipart:
+    cfg = get_settings()
+    sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🌟 Congratulations! You've passed the first screening for {job_title}"
+    msg["From"] = sender
+    msg["To"] = recipient_email
+
+    plain = (
+        f"Dear {first_name},\n\n"
+        f"We are pleased to inform you that after an initial AI-driven semantic "
+        f"analysis of your application, you have been shortlisted for the "
+        f"{job_title} position at {company_name}.\n\n"
+        f"You are among the top candidates in our applicant pool. Please stay "
+        f"tuned as our team prepares the technical assessment stage. You will "
+        f"receive further instructions shortly.\n\n"
+        f"Best regards,\n"
+        f"TalentPilot AI Recruitment Team"
+    )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
+        <h2 style="color: #16a34a;">🌟 You've been shortlisted!</h2>
+        <p>Dear <strong>{first_name}</strong>,</p>
+        <p>
+          We are pleased to inform you that after an initial AI-driven semantic
+          analysis of your application, you have been <strong>shortlisted</strong>
+          for the <strong>{job_title}</strong> position at
+          <strong>{company_name}</strong>.
+        </p>
+        <p>
+          You are among the <strong>top candidates</strong> in our applicant pool.
+          Please stay tuned as our team prepares the technical assessment stage.
+          You will receive further instructions shortly.
+        </p>
+        <p style="color:#666;font-size:13px;">
+          This is an automated message from TalentPilot AI Recruitment Team.
+        </p>
+      </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(html, "html"))
+    return msg
+
+
+def send_shortlist_notification_sync(
+    recipient_email: str,
+    first_name: str,
+    job_title: str,
+    company_name: str,
+) -> bool:
+    """
+    Send a shortlist notification email synchronously (blocking).
+
+    Intended to be called from a Celery worker where blocking is acceptable.
+    Returns True on success, False on failure.
+    """
+    cfg = get_settings()
+
+    if not cfg.SMTP_USER or not cfg.SMTP_PASSWORD:
+        logger.warning(
+            "[email] SMTP_USER or SMTP_PASSWORD not configured — "
+            "skipping shortlist notification for '%s' → %s",
+            job_title, recipient_email,
+        )
+        return False
+
+    try:
+        msg = _build_shortlist_message(
+            recipient_email=recipient_email,
+            first_name=first_name,
+            job_title=job_title,
+            company_name=company_name,
+        )
+        with smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(cfg.SMTP_USER, cfg.SMTP_PASSWORD)
+            server.sendmail(cfg.SMTP_USER, recipient_email, msg.as_string())
+
+        logger.info(
+            "[email] Shortlist notification sent to %s for job '%s'.",
+            recipient_email, job_title,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "[email] Failed to send shortlist notification to %s: %s",
+            recipient_email, exc,
+        )
+        return False
+
+
 # ── Public API — fire-and-forget ──────────────────────────────────────────────
 
 def send_post_live_notification(

@@ -30,6 +30,7 @@ class JobRequisition(Base):
     posting_start_date = Column(Date, nullable=True)
     cv_collection_end_date = Column(Date, nullable=True)
     status = Column(String(50), default="Draft")
+    shortlist_notified = Column(Boolean, nullable=True, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

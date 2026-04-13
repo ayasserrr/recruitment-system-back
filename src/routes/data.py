@@ -9,6 +9,8 @@ from helpers import get_settings, settings
 from controllers import CompanyController, DataController, ProcessController
 from database.connection import get_db
 from models import ResponseSignal
+from models.db.application import Application
+from models.db.job_posting import JobPosting
 from services import CVPersistenceService
 from routes.jobs import check_job_deadline
 
@@ -107,6 +109,34 @@ async def upload_data(
             file_url=str(file_path),
             registered_candidate_id=registered_id,
         )
+
+        # Create / upsert Application record so the ranking pipeline can find this CV.
+        # context_gatherer_node queries exclusively via the Application table.
+        try:
+            requisition_id_int = int(job_id)
+            posting = db.query(JobPosting).filter(
+                JobPosting.requisition_id == requisition_id_int
+            ).first()
+            if posting and db_candidate_id:
+                existing_app = db.query(Application).filter(
+                    Application.posting_id == posting.posting_id,
+                    Application.candidate_id == db_candidate_id,
+                ).first()
+                if existing_app:
+                    existing_app.cv_id = db_cv_id
+                else:
+                    db.add(Application(
+                        posting_id=posting.posting_id,
+                        candidate_id=db_candidate_id,
+                        cv_id=db_cv_id,
+                        status="Applied",
+                    ))
+                db.commit()
+        except (ValueError, TypeError):
+            pass  # job_id is not a DB requisition_id — skip application creation
+        except Exception as e:
+            logger.warning(f"Could not create application record for {company_id}/{job_id}/{candidate_id}: {e}")
+
     except Exception as e:
         logger.error(f"Error processing CV JSON for {company_id}/{job_id}/{candidate_id}: {e}")
         return JSONResponse(

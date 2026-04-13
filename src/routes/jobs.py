@@ -34,7 +34,8 @@ class JobPublicResponse(BaseModel):
     min_education_level: Optional[str]
     full_job_description: Optional[str]
     contact_email: Optional[str]
-    cv_collection_end_date: Optional[str]   # ISO 8601
+    posting_start_date: Optional[str]       # ISO 8601 — frontend uses this to show "opens on"
+    cv_collection_end_date: Optional[str]   # ISO 8601 — frontend uses this to show "closes on"
     is_open: bool
 
     class Config:
@@ -45,8 +46,10 @@ class JobPublicResponse(BaseModel):
 
 def check_job_deadline(requisition_id: int, db: Session) -> JobRequisition:
     """
-    Fetch the requisition and raise 403 if cv_collection_end_date has passed.
-    Raises 404 if the job does not exist.
+    Fetch the requisition and enforce the application window:
+      • 404  if the job does not exist.
+      • 403 NOT_YET_OPEN   if today < posting_start_date  (job not open yet).
+      • 403 APPLICATION_CLOSED  if today >= cv_collection_end_date (deadline passed).
     """
     req = db.query(JobRequisition).filter(
         JobRequisition.requisition_id == requisition_id
@@ -58,22 +61,37 @@ def check_job_deadline(requisition_id: int, db: Session) -> JobRequisition:
             detail="Job not found.",
         )
 
-    if req.cv_collection_end_date is not None:
-        today_utc = datetime.now(timezone.utc).date()
-        if today_utc >= req.cv_collection_end_date:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="APPLICATION_CLOSED",
-            )
+    today_utc = datetime.now(timezone.utc).date()
+
+    # Opening gate: reject submissions before the job is officially live
+    if req.posting_start_date is not None and today_utc < req.posting_start_date:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="NOT_YET_OPEN",
+        )
+
+    # Closing gate: reject submissions once the CV collection deadline has passed
+    if req.cv_collection_end_date is not None and today_utc >= req.cv_collection_end_date:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="APPLICATION_CLOSED",
+        )
 
     return req
 
 
 def _is_open(req: JobRequisition) -> bool:
-    """Return True only when there is a deadline and it is still in the future."""
+    """
+    True only when today is inside the application window:
+      posting_start_date <= today < cv_collection_end_date
+    If a date is not set it is treated as unbounded on that side.
+    """
+    today = datetime.now(timezone.utc).date()
+    if req.posting_start_date is not None and today < req.posting_start_date:
+        return False   # job hasn't opened yet
     if req.cv_collection_end_date is None:
-        return True   # no deadline set → treat as open
-    return datetime.now(timezone.utc).date() < req.cv_collection_end_date
+        return True    # no closing deadline → open indefinitely
+    return today < req.cv_collection_end_date
 
 
 # ── GET /api/v1/jobs/{jid} ─────────────────────────────────────────────────
@@ -108,7 +126,10 @@ def get_job(jid: int, db: Session = Depends(get_db)):
         min_education_level=req.min_education_level,
         full_job_description=req.full_job_description,
         contact_email=req.contact_email,
-        # ISO 8601 string so the frontend can parse/display it directly
+        posting_start_date=(
+            req.posting_start_date.isoformat()
+            if req.posting_start_date else None
+        ),
         cv_collection_end_date=(
             req.cv_collection_end_date.isoformat()
             if req.cv_collection_end_date else None

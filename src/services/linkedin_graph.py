@@ -372,6 +372,15 @@ def api_publisher(state: LinkedInPublishState) -> LinkedInPublishState:
         )
         return {**state, "success": True}
 
+    # ── 422 DUPLICATE_POST — post already exists on LinkedIn, treat as success ──
+    if response.status_code == 422 and "DUPLICATE_POST" in response.text:
+        logger.info(
+            "[api_publisher] JR %s — LinkedIn 422 DUPLICATE_POST detected. "
+            "Post is already live; treating as success.",
+            state["jr_id"],
+        )
+        return {**state, "success": True}
+
     # ── non-201 responses ─────────────────────────────────────────────────────
     if response.status_code == 401:
         error_msg = (
