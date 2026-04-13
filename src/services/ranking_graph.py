@@ -41,8 +41,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, TypedDict
 
 import httpx
@@ -86,36 +87,187 @@ _AI_KEYWORDS: set[str] = {
     "opencv", "yolo", "stable diffusion", "openai", "groq api", "ollama",
 }
 
-# Semantic synonym map — canonical_name → [aliases]
+# ── Rich skill synonym map (canonical → aliases) ─────────────────────────────
+# Covers the full AI Engineer JD: core skills, secondary skills, and common
+# spelling / abbreviation variants seen in real CVs.
 _SKILL_SYNONYMS: dict[str, list[str]] = {
-    "tensorflow": ["tf", "keras"],
-    "pytorch": ["torch"],
-    "large language model": ["llm", "gpt", "language model", "claude", "gemini"],
+    "python": [
+        "python", "fastapi", "django", "flask", "backend python",
+        "scripting", "oop python", "pythonic", "python3",
+    ],
+    "ml_framework": [
+        "tensorflow", "tf.", "tf2", "keras", "pytorch", "torch", "lightning",
+        "deep learning", "neural network", "cnn", "convolutional neural",
+        "deep neural", "model training", "model architecture", "jax",
+        "tensorboard", "weights and biases", "wandb",
+    ],
+    "machine learning": [
+        "machine learning", "ml model", "ml pipeline", "supervised learning",
+        "unsupervised learning", "classification", "regression", "clustering",
+        "random forest", "xgboost", "gradient boosting", "decision tree",
+        "logistic regression", "predictive model", "feature engineering",
+        "scikit", "sklearn", "ai model", "ai-powered", "ml-powered",
+        "predictive analytics", "recommender system", "forecasting",
+        "ensemble learning", "hyperparameter tuning", "svm", "knn",
+    ],
+    "deep learning": [
+        "deep learning", "neural network", "cnn", "convolutional neural network",
+        "rnn", "lstm", "transformer", "attention mechanism", "backpropagation",
+        "batch normalization", "dropout", "fine-tuning", "transfer learning",
+        "epoch", "loss function", "gan", "autoencoder", "resnet", "vgg",
+        "pre-trained models", "neural architecture",
+    ],
+    "computer vision": [
+        "computer vision", "image classification", "image segmentation",
+        "object detection", "object recognition", "image processing", "cnn",
+        "convolutional", "yolo", "opencv", "cv2", "visual recognition",
+        "image analysis", "bounding box", "detection model", "mediapipe",
+        "ocr", "facial recognition", "semantic segmentation", "easyocr", "paddleocr",
+    ],
+    "nlp": [
+        "nlp", "natural language processing", "natural language", "language processing",
+        "text classification", "named entity recognition", "ner", "text generation",
+        "sentiment analysis", "language model", "nlp pipeline", "tokenization",
+        "text processing", "information extraction", "transformers", "bert",
+        "spacy", "nltk", "llm", "large language model", "langchain", "gpt",
+        "llama", "gemini", "openai", "generative ai", "semantic", "chatbot",
+        "conversational ai", "text summarization", "word2vec",
+        "question answering", "information retrieval", "watsonx", "ibm watsonx",
+    ],
+    "deployment": [
+        "fastapi", "fast api", "flask", "flask api", "rest api", "restful api",
+        "api endpoint", "api development", "backend api", "web framework",
+        "deployed", "deployment", "serving", "inference api", "model serving",
+        "web app", "streamlit", "gradio", "docker", "containeriz", "kubernetes",
+        "huggingface spaces", "hf spaces", "mlflow", "model registry",
+        "web service", "hosted", "ci/cd", "mlops", "production system",
+        "ngrok", "heroku", "render.com", "watsonx orchestrate",
+    ],
+    "data analysis": [
+        "data analysis", "data analytics", "pandas", "numpy", "matplotlib",
+        "seaborn", "plotly", "data visualization", "exploratory data analysis",
+        "eda", "statistical analysis", "data processing", "data cleaning",
+        "data preprocessing", "jupyter", "notebook", "data science", "scipy",
+        "sql", "power bi", "tableau", "data wrangling",
+    ],
+    "scikit-learn": [
+        "scikit-learn", "sklearn", "scikit learn", "scikit",
+        "classification model", "regression model", "random forest", "svm",
+        "support vector", "gradient boosting", "decision tree",
+        "logistic regression", "k-means", "cross-validation", "grid search",
+        "train_test_split", "standardscaler", "minmaxscaler",
+    ],
+    "nlp_pipeline": [
+        "nlp pipeline", "text processing", "sequence labeling", "rag",
+        "retrieval augmented", "vector database", "faiss", "pinecone",
+        "embeddings", "chromadb", "similarity search", "knowledge base",
+        "weaviate", "milvus", "semantic search",
+    ],
+    "prompt engineering": [
+        "prompt engineering", "prompt design", "prompt tuning", "few-shot",
+        "chain-of-thought", "system prompt", "zero-shot", "in-context learning",
+        "prompt optimization", "cot", "llm prompt",
+    ],
+    "langchain": [
+        "langchain", "lang chain", "langgraph", "lang graph", "llm agent",
+        "ai agent", "agentic", "tool calling", "function calling",
+        "llm orchestration", "chains", "document loaders",
+    ],
+    # Legacy keys kept for backward compatibility
+    "tensorflow": ["tensorflow", "tf", "keras", "tf2"],
+    "pytorch": ["pytorch", "torch"],
+    "large language model": ["llm", "gpt", "language model", "claude", "gemini", "llama"],
     "retrieval augmented generation": ["rag", "retrieval augmented"],
-    "mlops": ["ml ops", "machine learning operations", "model serving", "model deployment"],
+    "mlops": ["ml ops", "machine learning operations", "model serving", "model deployment", "mlflow"],
     "vector database": ["vector db", "faiss", "chroma", "pinecone", "weaviate", "milvus", "qdrant"],
-    "natural language processing": ["nlp", "text mining", "text classification", "text analytics"],
-    "computer vision": ["image recognition", "object detection", "image processing", "opencv", "yolo"],
-    "machine learning": ["ml", "sklearn", "scikit-learn", "statistical learning"],
-    "deep learning": ["dl", "neural network", "ann", "cnn", "rnn", "lstm", "attention"],
-    "python": ["py", "python3"],
-    "javascript": ["js", "es6", "ecmascript"],
-    "react": ["reactjs", "react.js", "react native"],
-    "node.js": ["nodejs", "node", "express", "express.js"],
-    "kubernetes": ["k8s", "helm", "container orchestration"],
     "docker": ["containerization", "container", "dockerfile"],
     "aws": ["amazon web services", "ec2", "s3", "sagemaker", "lambda", "amazon cloud"],
     "gcp": ["google cloud", "google cloud platform", "bigquery", "vertex ai"],
     "azure": ["microsoft azure", "ms azure", "azure ml", "azure openai"],
     "sql": ["mysql", "postgresql", "postgres", "sqlite", "relational database", "t-sql"],
-    "nosql": ["mongodb", "redis", "cassandra", "dynamodb", "firebase"],
-    "ci/cd": ["devops", "github actions", "jenkins", "continuous integration", "gitlab ci"],
-    "agile": ["scrum", "kanban", "sprint", "jira"],
-    "transformer": ["bert", "gpt", "t5", "hugging face", "attention mechanism"],
-    "generative ai": ["genai", "gen ai", "generative model", "stable diffusion"],
-    "fine-tuning": ["finetuning", "fine tune", "lora", "qlora", "peft", "instruction tuning"],
-    "data engineering": ["etl", "data pipeline", "airflow", "spark", "hadoop", "dbt"],
     "api": ["rest api", "restful", "graphql", "fastapi", "flask", "django"],
+}
+
+# Bonus / nice-to-have skills
+_NICE_SYNONYMS: dict[str, list[str]] = {
+    "opencv":      ["opencv", "cv2", "open cv", "image manipulation", "easyocr", "paddleocr"],
+    "yolo":        ["yolo", "you only look once", "object detection", "yolov5", "yolov8", "ultralytics"],
+    "langchain":   ["langchain", "lang chain", "langgraph", "lang graph", "llm agent", "ai agent", "watsonx"],
+    "open-source": ["open-source", "open source", "github.com", "contributed to", "pull request", "github project"],
+    "kaggle":      [
+        "kaggle", "ai competition", "ml competition", "data science competition",
+        "hackathon", "ecpc", "icpc", "programming competition", "competition winner",
+        "rov competition", "sumo robot", "robotics competition", "codeforces", "leetcode",
+    ],
+}
+
+# Soft skill keyword signals
+_SOFT_SKILL_SYNONYMS: dict[str, list[str]] = {
+    "problem_solving": [
+        "problem solving", "problem-solving", "solved", "troubleshoot", "debug",
+        "optimized", "improved", "resolved", "tackled", "creative solution",
+        "overcame", "challenge", "innovative", "reducing", "reduced",
+        "error rate", "accuracy",
+    ],
+    "teamwork": [
+        "teamwork", "team work", "team", "collaborated", "collaboration",
+        "worked with", "cross-functional", "group project", "team member",
+        "together", "partnership", "coordinated", "joint", "co-developed",
+        "team player", "cooperative",
+        # Implicit teamwork signals (FIX-B)
+        "intern", "internship", "joined", "on-site", "hybrid",
+        "mentors", "mentor", "supervised", "cross-team", "department",
+        "stakeholder", "client", "reporting to",
+    ],
+    "communication": [
+        "communication", "interpersonal", "presented", "presentation",
+        "documented", "documentation", "report", "communicated", "explained",
+        "technical writing", "readme", "wrote", "articulated", "summarized",
+        "dashboard", "delivered", "demo", "demonstrat", "briefed",
+        "proposal", "trained", "workshop", "meeting",
+    ],
+    "analytical_thinking": [
+        "analyzed", "analysis", "evaluated", "assessed", "investigated",
+        "research", "studied", "measured", "compared", "data-driven",
+        "insights", "findings", "metrics", "benchmark",
+        "anomaly", "detection", "fraud", "pattern",
+    ],
+    "continuous_learning": [
+        "course", "certificate", "certification", "learning", "studied",
+        "self-taught", "bootcamp", "training", "workshop", "udemy",
+        "coursera", "kaggle", "online", "upskill",
+        "ibm", "nvidia", "huawei", "google", "iti", "deeplearning",
+    ],
+}
+
+# Deployment action phrases — distinguish real deployment from cert mentions
+_CLOUD_CERT_PHRASES = [
+    "aws certified", "gcp certified", "google cloud certified",
+    "azure certified", "cloud practitioner", "solutions architect",
+    "cloud certification", "certified cloud", "cloud associate",
+]
+_DEPLOYMENT_ACTION_PHRASES = [
+    "deployed", "hosted", "served", "built an api", "created an api",
+    "built a rest api", "developed an api", "exposed via api",
+    "model serving", "production deploy", "inference endpoint",
+    "launched on", "published on", "running on", "containerized",
+    "dockerized", "pushed to", "uploaded to", "integrated with api",
+    "backend api", "api endpoint", "fastapi", "flask app", "streamlit app",
+    "gradio app", "mlflow", "ngrok", "heroku", "render.com",
+    "huggingface spaces", "hf spaces", "cloud deployment",
+    "cloud hosted", "web service", "watsonx orchestrate",
+]
+
+# Certification issuer quality tiers
+_ISSUER_TIERS: dict[str, float] = {
+    "iti": 1.5, "information technology institute": 1.5,
+    "nvidia": 1.5, "ibm": 1.5, "google": 1.5, "udacity": 1.5,
+    "deeplearning.ai": 1.5, "deep learning ai": 1.5, "fast.ai": 1.5,
+    "hugging face": 1.5, "huggingface": 1.5, "stanford": 1.5, "mit": 1.5,
+    "microsoft": 1.3, "coursera": 1.0, "edx": 1.0,
+    "aws": 1.0, "amazon": 1.0, "kaggle": 1.0, "datacamp": 1.0,
+    "pluralsight": 1.0, "linkedin learning": 1.0,
+    "pytorch": 1.0, "tensorflow": 1.0,
 }
 
 # GenAI evidence terms for validator node
@@ -254,36 +406,116 @@ def semantic_skill_check(
     return False, ""
 
 
-def _calc_experience_months(experiences: list[dict]) -> tuple[int, int]:
-    """Returns (total_months, internship_months) computed from experience records."""
-    today = date.today()
-    total, internship = 0, 0
-
-    for exp in experiences:
-        start = exp.get("start_date")
-        if not start:
-            continue
-        end = exp.get("end_date") or today
-
-        if isinstance(start, str):
+def _parse_exp_date(value) -> Optional[date]:
+    """Coerce DB date / ISO string / None to a date object."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in ("", "null", "none", "present"):
+            return None
+        for fmt in ("%Y-%m-%d", "%m/%Y", "%Y"):
             try:
-                start = date.fromisoformat(start)
+                return datetime.strptime(value.strip(), fmt).date()
             except ValueError:
                 continue
-        if isinstance(end, str):
-            try:
-                end = date.fromisoformat(end)
-            except ValueError:
-                end = today
+    return None
+
+
+def _infer_exp_type(exp: dict) -> str:
+    """Classify an experience entry as full-time / internship / freelance / training."""
+    text = f"{exp.get('job_title', '')} {exp.get('description', '')}".lower()
+    if any(k in text for k in ["intern", "internship", "trainee"]):
+        return "internship"
+    if any(k in text for k in ["freelance", "freelancer", "contract", "self-employed"]):
+        return "freelance"
+    if any(k in text for k in [
+        "bootcamp", "course", "coursera", "udemy", "workshop",
+        "training", "program", "summer training",
+    ]):
+        return "training"
+    if any(k in text for k in [
+        "engineer", "developer", "scientist", "analyst", "lead", "manager",
+        "specialist", "architect", "researcher",
+    ]):
+        return "full-time"
+    return "unknown"
+
+
+def _calc_experience_breakdown(experiences: list[dict]) -> dict:
+    """
+    Separates work history into full-time / internship / freelance / training.
+
+    Full-time intervals are merged (de-duplicated) before summing so that
+    overlapping jobs are not double-counted.  Internship and freelance months
+    are summed directly (no overlap check — typically non-overlapping).
+
+    Returns a dict with:
+      fulltime_years, internship_months, freelance_years, training_count
+    """
+    today = date.today()
+    fulltime_intervals: list[tuple[date, date]] = []
+    internship_months = 0
+    freelance_months  = 0
+    training_count    = 0
+
+    for exp in (experiences or []):
+        exp_type = (_infer_exp_type(exp))
+
+        start = _parse_exp_date(exp.get("start_date"))
+        if not start:
+            if exp_type == "training":
+                training_count += 1
+            continue
+
+        end_raw = exp.get("end_date")
+        end = _parse_exp_date(end_raw) if end_raw else today
+        if end is None:
+            end = today
+
+        if end <= start:
+            end = today  # open-ended / bad data → treat as current
 
         months = max(0, (end.year - start.year) * 12 + (end.month - start.month))
-        total += months
+        if months == 0:
+            months = 1  # floor: at least 1 month
 
-        title = (exp.get("job_title") or "").lower()
-        if any(kw in title for kw in ["intern", "trainee", "apprentice", "student worker"]):
-            internship += months
+        if exp_type == "full-time":
+            fulltime_intervals.append((start, end))
+        elif exp_type == "internship":
+            internship_months += months
+        elif exp_type == "freelance":
+            freelance_months += months
+        elif exp_type == "training":
+            training_count += 1
 
-    return total, internship
+    # Merge overlapping full-time intervals before summing
+    fulltime_years = 0.0
+    if fulltime_intervals:
+        fulltime_intervals.sort(key=lambda x: x[0])
+        merged: list[list[date]] = [list(fulltime_intervals[0])]
+        for s, e in fulltime_intervals[1:]:
+            if s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        total_ft_months = sum(
+            (e.year - s.year) * 12 + (e.month - s.month)
+            for s, e in merged
+        )
+        fulltime_years = round(total_ft_months / 12, 1)
+
+    # Cap internship at 36 months in student mode, 60 months otherwise
+    internship_months = min(internship_months, 60)
+
+    return {
+        "fulltime_years":    fulltime_years,
+        "internship_months": internship_months,
+        "freelance_years":   round(freelance_months / 12, 1),
+        "training_count":    training_count,
+    }
 
 
 def _education_floor_score(candidate_level: str, required_level: str) -> float:
@@ -310,6 +542,250 @@ def _education_floor_score(candidate_level: str, required_level: str) -> float:
     if cand_idx >= req_idx:
         return 1.0
     return max(0.0, 1.0 - (req_idx - cand_idx) * 0.25)
+
+
+# ── Deployment context validation ────────────────────────────────────────────
+
+def _validate_deployment_context(cv_lower: str) -> bool:
+    """
+    Returns True only when the CV shows real deployment action, not just a
+    cloud certification name.  Prevents cert-only CVs from claiming the
+    deployment skill.
+    """
+    has_cert_only = any(p in cv_lower for p in _CLOUD_CERT_PHRASES)
+    has_action    = any(p in cv_lower for p in _DEPLOYMENT_ACTION_PHRASES)
+    return has_action if (has_cert_only and not has_action) else has_action
+
+
+# ── Keyword coverage (technical_match) ───────────────────────────────────────
+
+def _term_in_text(term: str, text: str) -> bool:
+    term = term.lower()
+    if " " in term or "-" in term or "." in term or "_" in term:
+        return term in text
+    return bool(re.search(r"\b" + re.escape(term) + r"\b", text))
+
+
+def _skill_matched(canonical: str, cv_lower: str) -> bool:
+    if canonical == "deployment":
+        return _validate_deployment_context(cv_lower)
+    aliases = _SKILL_SYNONYMS.get(canonical, [canonical])
+    return any(_term_in_text(alias, cv_lower) for alias in aliases)
+
+
+def _skill_in_projects(canonical: str, projects: list[dict]) -> bool:
+    aliases = _SKILL_SYNONYMS.get(canonical, [canonical])
+    for proj in projects:
+        proj_text = " ".join([
+            proj.get("project_name", ""),
+            proj.get("description", ""),
+            proj.get("tech_stack", ""),
+        ]).lower()
+        if any(_term_in_text(alias, proj_text) for alias in aliases):
+            return True
+    return False
+
+
+def _calc_keyword_coverage(
+    jd_required_skills: list[dict],
+    cv_lower: str,
+    projects: list[dict],
+) -> tuple[float, list[dict]]:
+    """
+    Scores how well the candidate covers the JD's required skills using
+    the rich synonym map + evidence-level weighting.
+
+    Evidence levels:
+      demonstrated   (used in a project AND deployed)  → 1.00
+      used_in_project (in a project but not deployed)   → 0.85
+      mentioned_only  (elsewhere in CV)                 → 0.50
+
+    Returns (score 0-100, matched_skills list).
+    """
+    _EVIDENCE_WEIGHT = {
+        "demonstrated":    1.00,
+        "used_in_project": 0.85,
+        "mentioned_only":  0.50,
+    }
+
+    required = [s for s in jd_required_skills if s.get("type") in ("required", None, "")]
+    preferred = [s for s in jd_required_skills if s.get("type") == "preferred"]
+
+    def _evidence(canonical: str) -> str:
+        if not _skill_matched(canonical, cv_lower):
+            return "not_found"
+        if not _skill_in_projects(canonical, projects):
+            return "mentioned_only"
+        return "demonstrated" if _validate_deployment_context(cv_lower) else "used_in_project"
+
+    matched_skills: list[dict] = []
+    req_weighted_sum = 0.0
+
+    for sk in required:
+        canonical = sk["name"].lower()
+        ev = _evidence(canonical)
+        if ev != "not_found":
+            w = _EVIDENCE_WEIGHT[ev]
+            req_weighted_sum += w
+            matched_skills.append({"skill": sk["name"], "match_type": ev})
+
+    req_score = (req_weighted_sum / max(1, len(required))) * 70.0
+
+    pref_matched = 0
+    for sk in preferred:
+        ev = _evidence(sk["name"].lower())
+        if ev != "not_found":
+            pref_matched += 1
+            matched_skills.append({"skill": sk["name"], "match_type": ev})
+
+    pref_score = (pref_matched / max(1, len(preferred))) * 30.0 if preferred else 0.0
+
+    return round(min(100.0, req_score + pref_score), 1), matched_skills
+
+
+# ── Tiered CV-stuffing detection ─────────────────────────────────────────────
+
+def _detect_cv_stuffing_tiered(skill_names: list[str], cv_lower: str,
+                                experiences: list[dict], projects: list[dict]) -> float:
+    """
+    Detects skills listed but unsupported by any work/project context.
+    Returns a penalty (0.0–12.0 points) applied to technical_match.
+
+    Thresholds (stuffing_ratio):
+      > 0.60 → −12 pts
+      > 0.50 → −6  pts
+      > 0.40 → −3  pts  (only if ≥ 5 suspicious skills)
+    """
+    if not skill_names:
+        return 0.0
+
+    context_text = " ".join([
+        " ".join(e.get("description", "") for e in experiences),
+        " ".join(
+            f"{p.get('project_name','')} {p.get('description','')} {p.get('tech_stack','')}"
+            for p in projects
+        ),
+    ]).lower()
+
+    def _covered(skill: str) -> bool:
+        sl = skill.lower()
+        if sl in context_text:
+            return True
+        for canonical, aliases in _SKILL_SYNONYMS.items():
+            if sl == canonical or sl in aliases or any(
+                len(a) > 4 and (a in sl or sl in a) for a in aliases
+            ):
+                if any(alias in context_text for alias in aliases):
+                    return True
+        return False
+
+    suspicious = [s for s in skill_names if len(s) >= 3 and not _covered(s)]
+    ratio = len(suspicious) / max(len(skill_names), 1)
+
+    if ratio > 0.6 and len(suspicious) >= 5:
+        return 12.0
+    if ratio > 0.5 and len(suspicious) >= 5:
+        return 6.0
+    if ratio > 0.4 and len(suspicious) >= 5:
+        return 3.0
+    return 0.0
+
+
+# ── Soft skills scoring ───────────────────────────────────────────────────────
+
+def _score_soft_skills(cv_lower: str, internship_months: int) -> float:
+    """
+    Score five soft-skill dimensions using keyword evidence.
+    Returns 0–100.
+
+    [FIX-B/FIX-E] Any candidate with internship experience gets a floor
+    boost to teamwork + communication so that real-world work is rewarded.
+    """
+    dim_scores: dict[str, float] = {}
+
+    for dim, keywords in _SOFT_SKILL_SYNONYMS.items():
+        hit = any(kw in cv_lower for kw in keywords)
+        dim_scores[dim] = 1.0 if hit else 0.0
+
+    # Implicit boost from internship experience
+    if internship_months > 0:
+        dim_scores["teamwork"]      = max(dim_scores["teamwork"],      0.7)
+        dim_scores["communication"] = max(dim_scores["communication"], 0.6)
+
+    avg = sum(dim_scores.values()) / max(len(dim_scores), 1)
+    return round(min(100.0, avg * 100.0), 1)
+
+
+# ── Nice-to-have scoring ──────────────────────────────────────────────────────
+
+def _score_nice_to_have(cv_lower: str) -> float:
+    """
+    Score 0–100 for bonus/nice-to-have signals (opencv, yolo, langchain,
+    open-source contributions, competition participation).
+    """
+    hits = sum(
+        1 for aliases in _NICE_SYNONYMS.values()
+        if any(_term_in_text(alias, cv_lower) for alias in aliases)
+    )
+    return round(min(100.0, hits * 20.0), 1)
+
+
+# ── Training score from experience breakdown ──────────────────────────────────
+
+def _calc_training_score_from_breakdown(exp_breakdown: dict) -> float:
+    """
+    Estimates training/certification quality from the experience breakdown.
+    Score 0–100.
+
+    Components:
+      • internship months  → up to 45 pts (5 pts/month)
+      • training entries   → up to 15 pts (5 pts each)
+      • freelance years    → up to  5 pts
+    """
+    score = 0.0
+    score += min(45.0, exp_breakdown["internship_months"] * 5.0)
+    score += min(15.0, exp_breakdown["training_count"]    * 5.0)
+    score += min(5.0,  exp_breakdown["freelance_years"]   * 5.0)
+    return round(min(100.0, score), 1)
+
+
+# ── Education fit (with AI-field raw-text fallback) ───────────────────────────
+
+def _calc_education_fit(candidate: dict, jd: dict, cv_lower: str) -> float:
+    """
+    Education score 0–100.
+    1. Degree hierarchy floor (0.0–1.0) from _education_floor_score.
+    2. Field-of-study word-overlap bonus.
+    3. [FIX-A] AI/ML field fallback: if the structured field is empty but
+       CV text mentions AI-related education, apply a partial credit floor.
+    """
+    min_edu   = jd.get("min_education_level") or ""
+    jd_field  = (jd.get("field_of_study") or "").lower()
+
+    floor = _education_floor_score(candidate.get("education_level", ""), min_edu)
+
+    cand_field = (candidate.get("field_of_study") or "").lower()
+
+    # Fallback: scan raw text for education field keywords if DB field empty
+    if not cand_field:
+        ai_edu_keywords = [
+            "artificial intelligence", "computer science", "data science",
+            "machine learning", "software engineering", "information technology",
+            "computer engineering", "statistics",
+        ]
+        for kw in ai_edu_keywords:
+            if kw in cv_lower:
+                cand_field = kw
+                break
+
+    if jd_field and cand_field:
+        jd_words   = set(jd_field.split())
+        cand_words = set(cand_field.split())
+        overlap = len(jd_words & cand_words) / max(1, len(jd_words))
+    else:
+        overlap = 0.5  # neutral when not specified
+
+    return round(min(100.0, floor * 70.0 + overlap * 30.0), 1)
 
 
 def _build_raw_text(candidate: dict) -> str:
@@ -508,146 +984,117 @@ def context_gatherer_node(state: RankingState) -> RankingState:
 
 def deterministic_scoring_node(state: RankingState) -> RankingState:
     """
-    Rule-based scoring for each candidate.  All 5 fixes applied here.
+    Rule-based scoring for each candidate using the v6.0 algorithm.
 
     Scores produced (0–100 each):
-      • experience_score  — years + seniority alignment
-      • education_score   — [FIX-C] hierarchy floor + field match
-      • skill_coverage    — semantic matching + [FIX-D] stuffing penalty
-      • teamwork_score    — keyword signals + [FIX-B]/[FIX-E] internship boosts
+      • technical_match   — rich synonym-map coverage + evidence levels + stuffing penalty
+      • experience_quality— fulltime years OR internship months (student mode)
+      • education_fit     — degree hierarchy floor + field overlap + AI-field fallback
+      • soft_skills       — 5 dimensions via keyword evidence + internship implicit boost
+      • training_score    — internship months + training entries + freelance credit
+      • nice_to_have      — bonus signals (opencv, yolo, langchain, competitions, OSS)
     """
     jd = state["jd_data"]
     required_years: int = jd.get("required_years") or 0
     required_skills: list[dict] = jd.get("required_skills", [])
-    min_edu: str = jd.get("min_education_level") or ""
-    jd_field: str = (jd.get("field_of_study") or "").lower()
 
     scored: list[dict] = []
 
     for cand in state["candidates_data"]:
         try:
             raw_text: str = cand.get("raw_text", "")
-            text_lower = raw_text.lower()
+            cv_lower = raw_text.lower()
             skill_names: list[str] = [s["name"] for s in cand.get("skills", [])]
+            projects   = cand.get("projects", [])
+            experiences = cand.get("experiences", [])
             fixes_applied: list[str] = []
 
-            total_months, internship_months = _calc_experience_months(
-                cand.get("experiences", [])
-            )
-            candidate_years = total_months / 12
+            # ── Experience breakdown (fulltime / internship / freelance / training) ──
+            exp_breakdown = _calc_experience_breakdown(experiences)
+            fulltime_years    = exp_breakdown["fulltime_years"]
+            internship_months = exp_breakdown["internship_months"]
 
-            # ── [FIX-A] AI background detection ─────────────────────────────
-            ai_background = any(kw in text_lower for kw in _AI_KEYWORDS)
-            if ai_background and candidate_years == 0:
-                fixes_applied.append("[FIX-A] AI/ML background detected — experience floor lifted")
-
-            # ── Experience score ─────────────────────────────────────────────
-            if required_years == 0:
-                # Student mode: internship is the primary signal
-                exp_score = min(100.0, internship_months * 5.0)
-                if exp_score == 0 and ai_background:
-                    exp_score = 30.0  # [FIX-A] AI background floor
-            else:
-                if candidate_years >= required_years:
-                    exp_score = 100.0
-                elif candidate_years > 0:
-                    exp_score = min(100.0, (candidate_years / required_years) * 90.0)
-                elif ai_background:
-                    exp_score = 30.0  # [FIX-A]
-                else:
-                    exp_score = 0.0
-
-            # ── Education score [FIX-C] ──────────────────────────────────────
-            # Degree hierarchy floor (0.0–1.0)
-            floor = _education_floor_score(cand.get("education_level", ""), min_edu)
-            if floor < 1.0:
-                fixes_applied.append("[FIX-C] Education floor applied")
-
-            # Field-of-study match bonus
-            cand_field = (cand.get("field_of_study") or "").lower()
-            if jd_field and cand_field:
-                # Check overlap in key words
-                jd_words = set(jd_field.split())
-                cand_words = set(cand_field.split())
-                field_overlap = len(jd_words & cand_words) / max(1, len(jd_words))
-            else:
-                field_overlap = 0.5  # neutral if not specified
-
-            edu_score = min(100.0, floor * 70.0 + field_overlap * 30.0)
-
-            # ── Skill coverage + [FIX-D] stuffing penalty ───────────────────
-            matched_skills: list[dict] = []
-            req_skills = [s for s in required_skills if s.get("type") in ("required", None, "")]
-            pref_skills = [s for s in required_skills if s.get("type") == "preferred"]
-
-            req_count = len(req_skills)
-            pref_count = len(pref_skills)
-
-            req_matched = 0
-            for sk in req_skills:
-                hit, mtype = semantic_skill_check(sk["name"], skill_names, raw_text)
-                if hit:
-                    req_matched += 1
-                    matched_skills.append({"skill": sk["name"], "match_type": mtype})
-
-            pref_matched = 0
-            for sk in pref_skills:
-                hit, mtype = semantic_skill_check(sk["name"], skill_names, raw_text)
-                if hit:
-                    pref_matched += 1
-                    matched_skills.append({"skill": sk["name"], "match_type": mtype})
-
-            base_coverage = (req_matched / max(1, req_count)) * 70.0
-            pref_bonus = (pref_matched / max(1, pref_count)) * 30.0 if pref_count else 0.0
-
-            # [FIX-D] Tiered stuffing penalty
-            total_skill_count = len(skill_names)
-            stuffing_penalty = 0.0
-            if total_skill_count > 20:
-                stuffing_penalty = min(20.0, (total_skill_count - 20) * 1.0)
+            # ── [FIX-A] AI/ML background detection ───────────────────────────
+            ai_background = any(kw in cv_lower for kw in _AI_KEYWORDS)
+            if ai_background and fulltime_years == 0 and internship_months == 0:
                 fixes_applied.append(
-                    f"[FIX-D] Keyword-stuffing penalty −{stuffing_penalty:.0f}pt "
-                    f"({total_skill_count} skills listed)"
+                    "[FIX-A] AI/ML background detected — experience floor lifted"
                 )
 
-            skill_coverage = max(0.0, min(100.0, base_coverage + pref_bonus - stuffing_penalty))
+            # ── Experience quality score ──────────────────────────────────────
+            if required_years == 0:
+                # Student mode: internship + AI background are primary signals
+                exp_score = min(100.0, internship_months * 5.0)
+                if exp_score == 0 and ai_background:
+                    exp_score = 30.0  # [FIX-A] baseline for AI students
+            else:
+                candidate_years = fulltime_years + exp_breakdown["freelance_years"] * 0.5
+                if candidate_years >= required_years:
+                    exp_score = 90.0
+                elif candidate_years >= required_years - 1:
+                    exp_score = 75.0
+                elif candidate_years >= required_years - 2:
+                    exp_score = 58.0
+                elif candidate_years >= 1:
+                    exp_score = 40.0
+                elif candidate_years > 0:
+                    exp_score = 22.0
+                elif ai_background:
+                    exp_score = 20.0  # [FIX-A]
+                else:
+                    exp_score = 8.0
 
-            # ── Teamwork score [FIX-B / FIX-E] ──────────────────────────────
-            team_keywords = [
-                "team", "collaborat", "coordinated", "led", "cross-functional",
-                "worked with", "pair", "together", "stakeholder", "sprint",
-            ]
-            all_exp_text = " ".join(
-                (e.get("description") or "") for e in cand.get("experiences", [])
-            ).lower()
-            team_signal = any(kw in all_exp_text for kw in team_keywords)
+            # ── Education fit [FIX-C + FIX-A field fallback] ─────────────────
+            edu_score = _calc_education_fit(cand, jd, cv_lower)
 
-            teamwork_score = 40.0 if team_signal else 25.0  # base
+            # ── Technical match — rich synonym map + evidence levels ──────────
+            raw_tech_score, matched_skills = _calc_keyword_coverage(
+                required_skills, cv_lower, projects
+            )
 
-            # [FIX-B] Internship = implicit teamwork evidence
-            if internship_months > 0:
-                intern_boost = min(35.0, internship_months * 2.0)
-                teamwork_score += intern_boost
+            # Tiered stuffing penalty [FIX-D]
+            stuffing_penalty = _detect_cv_stuffing_tiered(
+                skill_names, cv_lower, experiences, projects
+            )
+            if stuffing_penalty > 0:
                 fixes_applied.append(
-                    f"[FIX-B/FIX-E] Teamwork boost +{intern_boost:.0f}pt "
+                    f"[FIX-D] CV stuffing penalty −{stuffing_penalty:.0f}pt"
+                )
+
+            technical_match = max(0.0, raw_tech_score - stuffing_penalty)
+
+            # ── Soft skills [FIX-B / FIX-E] ──────────────────────────────────
+            soft_score = _score_soft_skills(cv_lower, internship_months)
+            if internship_months > 0:
+                fixes_applied.append(
+                    f"[FIX-B/FIX-E] Soft skills implicit boost "
                     f"from {internship_months}mo internship"
                 )
 
-            teamwork_score = min(100.0, teamwork_score)
+            # ── Training score ────────────────────────────────────────────────
+            training_score = _calc_training_score_from_breakdown(exp_breakdown)
+
+            # ── Nice-to-have bonus ────────────────────────────────────────────
+            nice_score = _score_nice_to_have(cv_lower)
+
+            total_experience_months = int(fulltime_years * 12) + internship_months
 
             scored.append({
                 **cand,
-                "total_experience_months": total_months,
-                "internship_months": internship_months,
-                "ai_background_detected": ai_background,
-                "matched_skills": matched_skills,
-                "stuffing_penalty": stuffing_penalty,
-                "applied_fixes": fixes_applied,
+                "total_experience_months": total_experience_months,
+                "fulltime_years":          fulltime_years,
+                "internship_months":       internship_months,
+                "ai_background_detected":  ai_background,
+                "matched_skills":          matched_skills,
+                "stuffing_penalty":        stuffing_penalty,
+                "applied_fixes":           fixes_applied,
                 "det_scores": {
-                    "experience_score": round(exp_score, 1),
-                    "education_score": round(edu_score, 1),
-                    "skill_coverage": round(skill_coverage, 1),
-                    "teamwork_score": round(teamwork_score, 1),
+                    "technical_match":    round(technical_match, 1),
+                    "experience_quality": round(exp_score, 1),
+                    "education_fit":      round(edu_score, 1),
+                    "soft_skills":        round(soft_score, 1),
+                    "training_score":     round(training_score, 1),
+                    "nice_to_have":       round(nice_score, 1),
                 },
             })
 
@@ -656,20 +1103,22 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
                 "[deterministic_scoring] Error on candidate %s — %s",
                 cand.get("candidate_name"), exc,
             )
-            # Carry candidate forward with zero scores so ranking still works
             scored.append({
                 **cand,
                 "total_experience_months": 0,
-                "internship_months": 0,
-                "ai_background_detected": False,
-                "matched_skills": [],
-                "stuffing_penalty": 0.0,
-                "applied_fixes": ["[ERROR] Deterministic scoring failed — zeros applied"],
+                "fulltime_years":          0.0,
+                "internship_months":       0,
+                "ai_background_detected":  False,
+                "matched_skills":          [],
+                "stuffing_penalty":        0.0,
+                "applied_fixes":           ["[ERROR] Deterministic scoring failed — zeros applied"],
                 "det_scores": {
-                    "experience_score": 0.0,
-                    "education_score": 0.0,
-                    "skill_coverage": 0.0,
-                    "teamwork_score": 0.0,
+                    "technical_match":    0.0,
+                    "experience_quality": 0.0,
+                    "education_fit":      0.0,
+                    "soft_skills":        0.0,
+                    "training_score":     0.0,
+                    "nice_to_have":       0.0,
                 },
             })
 
@@ -917,21 +1366,26 @@ def genai_validator_node(state: RankingState) -> RankingState:
 # Node 5 — Final Ranker
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Dynamic weight sets — chosen by JD's required_years
+# ── Dynamic weight sets (v6.0 rebalanced) ────────────────────────────────────
+# Student mode  (required_years == 0): projects + skills are primary signals.
+#   training_score lowered, education raised, soft/nice are tie-breakers.
+# Experience mode (required_years > 0): years + skills dominate.
 _WEIGHTS_STUDENT = {
-    "project_depth": 0.35,
-    "skill_coverage": 0.25,
-    "teamwork_score": 0.15,
-    "education_score": 0.20,
-    "experience_score": 0.05,
+    "technical_match":    0.35,
+    "project_depth":      0.35,   # from LLM node
+    "education_fit":      0.20,
+    "training_score":     0.05,
+    "soft_skills":        0.02,
+    "nice_to_have":       0.03,
 }
 
 _WEIGHTS_EXPERIENCE = {
-    "experience_score": 0.35,
-    "skill_coverage": 0.30,
-    "education_score": 0.15,
-    "project_depth": 0.10,
-    "teamwork_score": 0.10,
+    "experience_quality": 0.35,
+    "technical_match":    0.30,
+    "project_depth":      0.25,   # from LLM node
+    "education_fit":      0.05,
+    "soft_skills":        0.02,
+    "nice_to_have":       0.03,
 }
 
 
@@ -1019,15 +1473,17 @@ def final_ranker_node(state: RankingState) -> RankingState:
             genai = cand.get("genai_data", {})
 
             component_scores = {
-                "experience_score": det.get("experience_score", 0.0),
-                "education_score": det.get("education_score", 0.0),
-                "skill_coverage": det.get("skill_coverage", 0.0),
-                "teamwork_score": det.get("teamwork_score", 0.0),
-                "project_depth": float(llm.get("project_depth", 0)),
+                "technical_match":    det.get("technical_match", 0.0),
+                "experience_quality": det.get("experience_quality", 0.0),
+                "education_fit":      det.get("education_fit", 0.0),
+                "soft_skills":        det.get("soft_skills", 0.0),
+                "training_score":     det.get("training_score", 0.0),
+                "nice_to_have":       det.get("nice_to_have", 0.0),
+                "project_depth":      float(llm.get("project_depth", 0)),
             }
 
             weighted_sum = sum(
-                component_scores[k] * v for k, v in weights.items()
+                component_scores.get(k, 0.0) * v for k, v in weights.items()
             )
 
             genai_bonus = genai.get("bonus", 0.0)
@@ -1114,14 +1570,17 @@ def _format_ai_insights(cand: dict) -> str:
     def w(key: str) -> str:
         return f"{weights.get(key, 0) * 100:.0f}%"
 
-    proj_depth = cand.get("component_scores", {}).get("project_depth", llm.get("project_depth", 0))
+    cs = cand.get("component_scores", {})
+    proj_depth = cs.get("project_depth", llm.get("project_depth", 0))
 
     breakdown = (
-        f"  • Project Depth  ({w('project_depth')} weight): {proj_depth:.0f}/100\n"
-        f"  • Skill Coverage ({w('skill_coverage')} weight): {det.get('skill_coverage', 0):.0f}/100\n"
-        f"  • Education      ({w('education_score')} weight): {det.get('education_score', 0):.0f}/100\n"
-        f"  • Teamwork       ({w('teamwork_score')} weight): {det.get('teamwork_score', 0):.0f}/100\n"
-        f"  • Experience     ({w('experience_score')} weight): {det.get('experience_score', 0):.0f}/100\n"
+        f"  • Technical Match  ({w('technical_match')} weight): {cs.get('technical_match', det.get('technical_match', 0)):.0f}/100\n"
+        f"  • Project Depth    ({w('project_depth')} weight): {proj_depth:.0f}/100\n"
+        f"  • Education Fit    ({w('education_fit')} weight): {cs.get('education_fit', det.get('education_fit', 0)):.0f}/100\n"
+        f"  • Experience Quality ({w('experience_quality')} weight): {cs.get('experience_quality', det.get('experience_quality', 0)):.0f}/100\n"
+        f"  • Soft Skills      ({w('soft_skills')} weight): {cs.get('soft_skills', det.get('soft_skills', 0)):.0f}/100\n"
+        f"  • Training Score   ({w('training_score')} weight): {cs.get('training_score', det.get('training_score', 0)):.0f}/100\n"
+        f"  • Nice-to-Have     ({w('nice_to_have')} weight): {cs.get('nice_to_have', det.get('nice_to_have', 0)):.0f}/100\n"
         f"  • GenAI Bonus: +{genai.get('bonus', 0):.0f}pt "
         f"(context: {genai.get('context', 'none')}, "
         f"terms: {', '.join(genai.get('evidence', [])) or 'none found'})"
