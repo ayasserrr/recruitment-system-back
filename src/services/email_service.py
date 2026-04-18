@@ -41,7 +41,7 @@ def _build_message(
     sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "🚀 Your Job Requisition is now LIVE!"
+    msg["Subject"] = "Your Job Requisition is now LIVE!"
     msg["From"] = sender
     msg["To"] = recipient_email
 
@@ -60,7 +60,7 @@ def _build_message(
     html = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
-        <h2 style="color: #2563eb;">🚀 Your Job Post is LIVE!</h2>
+        <h2 style="color: #2563eb;">Your Job Post is LIVE!</h2>
         <p>Hello <strong>{recipient_name}</strong>,</p>
         <p>
           We are happy to inform you that your job post for
@@ -145,7 +145,7 @@ def _build_shortlist_message(
     sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"🌟 Congratulations! You've passed the first screening for {job_title}"
+    msg["Subject"] = f"Congratulations! You've passed the first screening for {job_title}"
     msg["From"] = sender
     msg["To"] = recipient_email
 
@@ -164,7 +164,7 @@ def _build_shortlist_message(
     html = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
-        <h2 style="color: #16a34a;">🌟 You've been shortlisted!</h2>
+        <h2 style="color: #16a34a;">You've been shortlisted!</h2>
         <p>Dear <strong>{first_name}</strong>,</p>
         <p>
           We are pleased to inform you that after an initial AI-driven semantic
@@ -249,7 +249,7 @@ def _build_assessment_invitation_message(
     sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"📋 Technical Assessment Invitation — {job_title}"
+    msg["Subject"] = f"Technical Assessment Invitation — {job_title}"
     msg["From"] = sender
     msg["To"] = recipient_email
 
@@ -273,7 +273,7 @@ def _build_assessment_invitation_message(
     html = f"""
     <html>
       <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
-        <h2 style="color: #7c3aed;">📋 Technical Assessment Invitation</h2>
+        <h2 style="color: #7c3aed;">Technical Assessment Invitation</h2>
         <p>Dear <strong>{first_name}</strong>,</p>
         <p>
           Congratulations on advancing to the <strong>Technical Assessment</strong> stage

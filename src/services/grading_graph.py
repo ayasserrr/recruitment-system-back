@@ -231,17 +231,23 @@ def _grade_open_ended(
     if not candidate_answer.strip():
         return 0.0, "No answer provided."
 
-    # Exact prompt as specified in the requirements
     user_msg = (
-        f"Evaluate this technical answer. Compare it against the reference. "
-        f"Assign a score out of {points} and provide concise professional feedback (ai_feedback).\n\n"
+        f"You are a strict but fair technical examiner. Grade the candidate's answer using the "
+        f"reference answer and grading guide below. Apply partial credit where justified.\n\n"
         f"Question: {question_text}\n\n"
         f"Reference Answer: {correct_answer}\n\n"
-        f"Grading Guide: {grading_guide or 'Award full marks for a complete and accurate answer.'}\n\n"
+        f"Grading Guide: {grading_guide or 'Full marks for a technically complete and accurate answer.'}\n\n"
         f"Candidate Answer: {candidate_answer}\n\n"
-        f"Respond ONLY with valid JSON:\n"
-        f"{{\"score\": <number 0-{points}>, "
-        f"\"ai_feedback\": \"<2-3 sentence concise professional feedback>\"}}"
+        f"Scoring rules:\n"
+        f"  - Full marks ({points}): Candidate demonstrates clear mastery — hits all key concepts, "
+        f"shows practical understanding, no significant errors.\n"
+        f"  - Partial credit (1-{points-1}): Answer is partially correct — covers some key concepts "
+        f"but misses critical points, has minor technical inaccuracies, or lacks depth.\n"
+        f"  - Zero (0): Answer is wrong, off-topic, vague to the point of uselessness, or not provided.\n\n"
+        f"Respond ONLY with valid JSON — no prose outside the JSON:\n"
+        f"{{\"score\": <integer 0-{points}>, "
+        f"\"ai_feedback\": \"<2-3 sentences: state what was correct, what was missing or wrong, "
+        f"and one specific improvement the candidate should study>\"}}"
     )
 
     raw = _llm_call(
@@ -481,14 +487,27 @@ def _llm_generate_report(
 ) -> tuple[str, str, str, str]:
     """Returns (strengths, weaknesses, overall_feedback, recommendation). Never raises."""
     user_msg = (
-        f"Analyze the following technical assessment results and generate a professional report.\n\n"
+        f"You are a senior engineering hiring manager writing a definitive assessment report "
+        f"that will be used in a hiring decision.\n\n"
         f"Overall Score: {total_score:.1f} / {total_possible:.0f} ({score_pct:.1f}%)\n\n"
-        f"Answer Details:\n{answers_text}\n\n"
+        f"Detailed Results:\n{answers_text}\n\n"
+        f"Instructions:\n"
+        f"  - strengths: 2-4 bullet points naming SPECIFIC technical competencies the candidate "
+        f"demonstrated with evidence from their answers. No generic praise.\n"
+        f"  - weaknesses: 2-4 bullet points identifying SPECIFIC technical gaps or errors. "
+        f"Reference concrete mistakes from the answers. No vague statements.\n"
+        f"  - overall_feedback: 3-4 sentences — synthesize the candidate's overall technical "
+        f"profile, signal-to-noise ratio in their answers, and suitability for a production "
+        f"engineering environment. Be direct and evidence-based.\n"
+        f"  - recommendation: EXACTLY one of: \"Hire\", \"Consider\", or \"Reject\".\n"
+        f"    Use 'Hire' if score >= 75% AND demonstrated depth.\n"
+        f"    Use 'Consider' if score 50-74% OR mixed quality answers.\n"
+        f"    Use 'Reject' if score < 50% OR critical conceptual failures.\n\n"
         f"Respond ONLY with valid JSON:\n"
         f"{{\n"
-        f"  \"strengths\": \"<2-4 bullet-point strengths the candidate demonstrated>\",\n"
-        f"  \"weaknesses\": \"<2-4 bullet-point gaps or areas for improvement>\",\n"
-        f"  \"overall_feedback\": \"<3-4 sentence holistic assessment>\",\n"
+        f"  \"strengths\": \"<bullet-point list>\",\n"
+        f"  \"weaknesses\": \"<bullet-point list>\",\n"
+        f"  \"overall_feedback\": \"<3-4 sentences>\",\n"
         f"  \"recommendation\": \"Hire\" | \"Consider\" | \"Reject\"\n"
         f"}}"
     )
@@ -497,14 +516,14 @@ def _llm_generate_report(
             {
                 "role": "system",
                 "content": (
-                    "You are a senior technical recruiter writing assessment reports. "
-                    "Be objective, professional, and specific. "
-                    "Always respond with valid JSON only."
+                    "You are a senior engineering hiring manager writing binding assessment reports. "
+                    "Be specific, evidence-based, and ruthlessly objective. "
+                    "Respond with valid JSON only — no commentary outside the JSON object."
                 ),
             },
             {"role": "user", "content": user_msg},
         ],
-        max_tokens=700,
+        max_tokens=900,
     )
 
     if raw:

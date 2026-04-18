@@ -6,14 +6,13 @@ Triggered automatically after CV Ranking is finalized (dispatched from send_shor
 Graph nodes (sequential):
   1. load_context_node       – load TechnicalAssessmentConfig, required skills, seniority,
                                and all Shortlisted applications from DB
-  2. generate_questions_node – GPT-4o-mini generates 5 tailored questions per skill;
+  2. generate_questions_node – GPT-4o-mini generates exactly 15 interdisciplinary questions
                                upserts AssessmentTemplate + saves AssessmentTemplateQuestion rows
   3. create_assessments_node – creates one CandidateAssessment row per Shortlisted application
   4. send_invitations_node   – sends unique HMAC-signed assessment invitation emails
 
 Re-run safety:
-  • generate_questions_node skips if the linked template already has ≥ MIN_QUESTIONS_PER_SKILL
-    questions per required skill.
+  • generate_questions_node skips if the linked template already has ≥ _TOTAL_QUESTIONS (15) questions.
   • create_assessments_node skips individual applications that already have a CandidateAssessment.
   • send_invitations_node only emails candidates whose CandidateAssessment.status is still
     "Pending" (prevents double-send on Celery retry).
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 _OPENAI_MODEL = "gpt-4o-mini"
-_MIN_QUESTIONS_PER_SKILL = 5
+_TOTAL_QUESTIONS = 15          # exactly 15 interdisciplinary questions per assessment
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +92,7 @@ def _llm_call(messages: list[dict], max_retries: int = 3, timeout: int = 90) -> 
                     "model": _OPENAI_MODEL,
                     "messages": messages,
                     "temperature": 0.4,
-                    "max_tokens": 2500,
+                    "max_tokens": 4500,
                 },
                 timeout=timeout,
             )
@@ -154,26 +153,37 @@ def build_assessment_url(assessment_id: int) -> str:
     return f"{cfg.APP_BASE_URL}/assessment/{assessment_id}?token={token}"
 
 
-def _build_question_prompt(skill: str, seniority: str) -> list[dict]:
+def _build_question_prompt(skills: list[str], seniority: str, job_title: str) -> list[dict]:
+    skills_list = ", ".join(skills)
     system_msg = (
-        "You are a Senior AI Recruiter and technical assessor. "
-        "You ONLY respond with valid JSON arrays — no markdown, no prose, no explanation."
+        "You are a principal-level technical interviewer writing a high-stakes screening assessment. "
+        "You ONLY respond with a valid JSON array — no markdown, no prose, no explanation, no emojis."
     )
     user_msg = (
-        f"Act as a Senior AI Recruiter. Generate 5 unique technical questions for the skill "
-        f"'{skill}' at '{seniority}' level.\n\n"
-        f"Output MUST be a valid JSON array of exactly 5 objects. Each object must have:\n"
-        f"  - question_text: string (the question)\n"
+        f"Design a rigorous technical assessment for a {seniority}-level {job_title} role.\n\n"
+        f"Required skills: {skills_list}\n\n"
+        f"STRICT REQUIREMENTS:\n"
+        f"1. Generate EXACTLY 15 questions — no more, no less.\n"
+        f"2. Questions MUST synthesize multiple skills from the list above. Never isolate a single skill. "
+        f"   Examples: '{skills[0]} + {skills[min(1, len(skills)-1)]} trade-offs', "
+        f"   'debugging a failure in a system using {skills[min(2, len(skills)-1)]}', "
+        f"   'architectural decision between two approaches involving multiple listed skills'.\n"
+        f"3. Question types: include exactly 9 MCQ and 6 open_ended questions.\n"
+        f"4. Complexity: focus on scenario-based problems, production debugging, architectural trade-offs, "
+        f"   and design decisions. PROHIBIT 'What is X?' or 'Define X' style questions.\n"
+        f"5. No emojis. No decorative symbols. Use plain, precise, technical English only.\n"
+        f"6. Keep correct_answer for MCQ to the letter only (A, B, C, or D).\n"
+        f"7. For open_ended, correct_answer must be a concise model answer (3-5 sentences max).\n"
+        f"8. ai_grading_guide must be 1-3 sentences: list the key technical concepts required and "
+        f"   what constitutes a partial vs full answer. No padding.\n"
+        f"9. Each MCQ option must be a technically distinct, plausible answer — avoid obvious distractors.\n\n"
+        f"Output MUST be a valid JSON array of exactly 15 objects. Each object:\n"
+        f"  - question_text: string\n"
         f"  - question_type: \"mcq\" or \"open_ended\"\n"
-        f"  - options: array of 4 strings for mcq (e.g. [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"]), "
-        f"or null for open_ended\n"
-        f"  - correct_answer: string — for mcq: the correct option letter (\"A\", \"B\", \"C\", or \"D\"); "
-        f"for open_ended: a model answer\n"
-        f"  - ai_grading_guide: string — criteria for evaluating candidate answers, including "
-        f"key concepts that must be mentioned and common mistakes to penalize\n\n"
-        f"Mix question types: include 3 MCQ and 2 open-ended questions. "
-        f"Make questions practical and relevant to real-world usage of {skill} at {seniority} level.\n\n"
-        f"Respond with ONLY the JSON array, nothing else."
+        f"  - options: [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"] for mcq, null for open_ended\n"
+        f"  - correct_answer: string (letter only for mcq; concise model answer for open_ended)\n"
+        f"  - ai_grading_guide: string (concise scoring criteria)\n\n"
+        f"Respond with ONLY the JSON array. Begin immediately with '['."
     )
     return [
         {"role": "system", "content": system_msg},
@@ -281,12 +291,11 @@ def load_context_node(state: AssessmentState) -> AssessmentState:
 
 def generate_questions_node(state: AssessmentState) -> AssessmentState:
     """
-    For each required skill, calls GPT-4o-mini to generate 5 questions.
-    Creates (or reuses) an AssessmentTemplate and saves AssessmentTemplateQuestion rows.
-    Updates TechnicalAssessmentConfig.template_id.
+    Makes ONE GPT-4o-mini call with all required skills to generate exactly
+    15 interdisciplinary questions. Questions cross-link multiple skills and
+    focus on scenario-based, architectural, and debugging problems.
 
-    Skip logic: if the template already has >= _MIN_QUESTIONS_PER_SKILL questions
-    per skill, the entire generation step is skipped.
+    Skip logic: template already has >= _TOTAL_QUESTIONS questions.
     """
     req_id = state["requisition_id"]
     config_id = state["config_id"]
@@ -297,26 +306,28 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
     job_title = state["job_title"]
 
     if not skills:
-        logger.info("[assessment_gen] No skills defined for requisition %d — skipping question generation.", req_id)
+        logger.info("[assessment_gen] No skills defined for requisition %d — skipping.", req_id)
         return {**state, "questions_generated": False}
+
+    skill_names = [s["skill_name"] for s in skills]
 
     db = SessionLocal()
     try:
-        # Check if existing template has sufficient questions
+        # Skip if existing template already has enough questions
         if existing_template_id:
             existing_count = (
                 db.query(AssessmentTemplateQuestion)
                 .filter(AssessmentTemplateQuestion.template_id == existing_template_id)
                 .count()
             )
-            if existing_count >= len(skills) * _MIN_QUESTIONS_PER_SKILL:
+            if existing_count >= _TOTAL_QUESTIONS:
                 logger.info(
-                    "[assessment_gen] Template %d already has %d questions — skipping generation.",
+                    "[assessment_gen] Template %d already has %d questions — skipping.",
                     existing_template_id, existing_count,
                 )
                 return {**state, "questions_generated": False, "template_id": existing_template_id}
 
-        # Create a new AssessmentTemplate if none exists
+        # Create or reuse template
         if not existing_template_id:
             template = AssessmentTemplate(
                 company_id=company_id,
@@ -328,7 +339,6 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
             db.flush()
             template_id = template.template_id
 
-            # Update TechnicalAssessmentConfig with new template_id
             config = db.query(TechnicalAssessmentConfig).filter(
                 TechnicalAssessmentConfig.config_id == config_id
             ).first()
@@ -336,69 +346,65 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
                 config.template_id = template_id
         else:
             template_id = existing_template_id
-            # Clear stale questions to regenerate
             db.query(AssessmentTemplateQuestion).filter(
                 AssessmentTemplateQuestion.template_id == template_id
             ).delete(synchronize_session=False)
 
-        total_saved = 0
-        for skill_entry in skills:
-            skill_name = skill_entry["skill_name"]
-            logger.info(
-                "[assessment_gen] Generating questions for skill '%s' at '%s' level.",
-                skill_name, seniority,
+        logger.info(
+            "[assessment_gen] Generating %d interdisciplinary questions for requisition %d "
+            "across skills: %s",
+            _TOTAL_QUESTIONS, req_id, ", ".join(skill_names),
+        )
+
+        messages = _build_question_prompt(skill_names, seniority, job_title)
+        raw_response = _llm_call(messages)
+
+        if raw_response is None:
+            logger.warning("[assessment_gen] LLM returned None — saving fallback questions.")
+            _save_fallback_questions(db, template_id, skill_names[0], seniority)
+            db.commit()
+            return {**state, "questions_generated": True, "template_id": template_id}
+
+        parsed, ok = _parse_json_response(raw_response)
+        if not ok or not isinstance(parsed, list) or len(parsed) == 0:
+            logger.warning(
+                "[assessment_gen] Invalid JSON from LLM: %s — using fallback.", raw_response[:300]
             )
-            messages = _build_question_prompt(skill_name, seniority)
-            raw_response = _llm_call(messages)
+            _save_fallback_questions(db, template_id, skill_names[0], seniority)
+            db.commit()
+            return {**state, "questions_generated": True, "template_id": template_id}
 
-            if raw_response is None:
-                logger.warning("[assessment_gen] LLM returned None for skill '%s' — using fallback.", skill_name)
-                _save_fallback_questions(db, template_id, skill_name, seniority)
-                total_saved += _MIN_QUESTIONS_PER_SKILL
-                continue
+        total_saved = 0
+        for q in parsed[:_TOTAL_QUESTIONS]:
+            try:
+                q_type = str(q.get("question_type", "mcq")).lower()
+                options_raw = q.get("options")
+                options_json = json.dumps(options_raw) if options_raw and isinstance(options_raw, list) else None
+                correct_answer = q.get("correct_answer") or ""
+                ai_grading_guide = q.get("ai_grading_guide") or ""
 
-            parsed, ok = _parse_json_response(raw_response)
-            if not ok or not isinstance(parsed, list) or len(parsed) == 0:
-                logger.warning(
-                    "[assessment_gen] Invalid JSON for skill '%s': %s — using fallback.",
-                    skill_name, raw_response[:200],
-                )
-                _save_fallback_questions(db, template_id, skill_name, seniority)
-                total_saved += _MIN_QUESTIONS_PER_SKILL
-                continue
+                if q_type == "open_ended" and ai_grading_guide:
+                    correct_answer = json.dumps({
+                        "answer": correct_answer,
+                        "grading_guide": ai_grading_guide,
+                    })
 
-            for q in parsed[:_MIN_QUESTIONS_PER_SKILL]:
-                try:
-                    q_type = str(q.get("question_type", "mcq")).lower()
-                    options_raw = q.get("options")
-                    options_json = json.dumps(options_raw) if options_raw and isinstance(options_raw, list) else None
-                    correct_answer = q.get("correct_answer") or ""
-                    ai_grading_guide = q.get("ai_grading_guide") or ""
-
-                    # For open-ended questions, embed grading guide alongside the answer
-                    if q_type == "open_ended" and ai_grading_guide:
-                        correct_answer = json.dumps({
-                            "answer": correct_answer,
-                            "grading_guide": ai_grading_guide,
-                        })
-
-                    question = AssessmentTemplateQuestion(
-                        template_id=template_id,
-                        question_text=str(q.get("question_text", "")),
-                        question_type=q_type,
-                        points=10,
-                        correct_answer=correct_answer,
-                        options=options_json,
-                    )
-                    db.add(question)
-                    total_saved += 1
-                except Exception as exc:
-                    logger.warning("[assessment_gen] Skipping malformed question for '%s': %s", skill_name, exc)
+                db.add(AssessmentTemplateQuestion(
+                    template_id=template_id,
+                    question_text=str(q.get("question_text", "")),
+                    question_type=q_type,
+                    points=10,
+                    correct_answer=correct_answer,
+                    options=options_json,
+                ))
+                total_saved += 1
+            except Exception as exc:
+                logger.warning("[assessment_gen] Skipping malformed question: %s", exc)
 
         db.commit()
         logger.info(
-            "[assessment_gen] Saved %d questions across %d skills for template %d.",
-            total_saved, len(skills), template_id,
+            "[assessment_gen] Saved %d/%d questions for template %d (requisition %d).",
+            total_saved, _TOTAL_QUESTIONS, template_id, req_id,
         )
         return {**state, "questions_generated": True, "template_id": template_id}
 
