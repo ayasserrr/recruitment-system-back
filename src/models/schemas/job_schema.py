@@ -1,6 +1,34 @@
+import re
 from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from datetime import date
+
+
+def _sanitize_skill_list(values: list) -> list[str]:
+    """
+    Normalize a list of skill strings:
+      - Strip surrounding whitespace
+      - Drop None, empty, or whitespace-only entries
+      - Drop entries shorter than 2 non-whitespace characters (e.g. "i", "g.")
+      - Drop entries that contain only punctuation / digits
+      - Deduplicate (case-insensitive, keeps first occurrence)
+    """
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for raw in (values or []):
+        if not raw:
+            continue
+        skill = str(raw).strip()
+        # Must have at least 2 word characters (letters/digits/underscore)
+        if len(re.sub(r"[^\w]", "", skill)) < 2:
+            continue
+        # Deduplicate case-insensitively
+        key = skill.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(skill)
+    return cleaned
 
 
 class JobRequisitionCreate(BaseModel):
@@ -16,6 +44,11 @@ class JobRequisitionCreate(BaseModel):
     # ── Requirements ────────────────────────────────────────────────────────
     requiredSkills: List[Optional[str]] = []
     preferredSkills: List[Optional[str]] = []
+
+    @field_validator("requiredSkills", "preferredSkills", mode="before")
+    @classmethod
+    def sanitize_skills(cls, v):
+        return _sanitize_skill_list(v if isinstance(v, list) else [])
     minExperience: Optional[int] = None
     maxExperience: Optional[int] = None
     minEducation: Optional[str] = None

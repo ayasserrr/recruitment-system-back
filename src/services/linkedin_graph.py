@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 # LinkedIn REST Posts API (newer, works with w_member_social scope)
 _LINKEDIN_POSTS_URL = "https://api.linkedin.com/rest/posts"
-_LINKEDIN_API_VERSION = "202504"   # keep current; bump quarterly if LinkedIn deprecates
+_LINKEDIN_API_VERSION = "202601"   # Jan-2025 — stable; bump to 202504 once it activates
 
 
 # ── State schema ──────────────────────────────────────────────────────────────
@@ -382,7 +382,14 @@ def api_publisher(state: LinkedInPublishState) -> LinkedInPublishState:
         return {**state, "success": True}
 
     # ── non-201 responses ─────────────────────────────────────────────────────
-    if response.status_code == 401:
+    if response.status_code == 426:
+        error_msg = (
+            f"LinkedIn API 426 Upgrade Required — API version '{_LINKEDIN_API_VERSION}' "
+            f"is not active. Update _LINKEDIN_API_VERSION in linkedin_graph.py to the "
+            f"current quarterly version (e.g. 202501, 202502…). "
+            f"Response: {response.text[:300]}"
+        )
+    elif response.status_code == 401:
         error_msg = (
             "LinkedIn API 401 Unauthorized — token is expired or revoked. "
             "Re-authenticate via /api/v1/auth/linkedin/url."

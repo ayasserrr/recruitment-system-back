@@ -402,6 +402,15 @@ def send_shortlist_emails(self, requisition_id: int) -> dict:
         sent,
         failed,
     )
+
+    # Dispatch assessment generation immediately after shortlist notifications
+    from tasks.assessment_tasks import process_assessment_generation  # avoid circular import at module level
+    process_assessment_generation.delay(requisition_id)
+    logger.info(
+        "[shortlist_notifier] Dispatched assessment generation for requisition %d.",
+        requisition_id,
+    )
+
     return {
         "requisition_id": requisition_id,
         "sent": sent,

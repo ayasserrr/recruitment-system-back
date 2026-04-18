@@ -15,6 +15,10 @@ class TechnicalAssessmentConfig(Base):
     assessment_language = Column(String(50), nullable=True)
     sample_task = Column(Text, nullable=True)
     assessment_questions = Column(Text, nullable=True)   # newline-joined custom questions
+    # Deadline set automatically 3 days after invitation emails are dispatched
+    assessment_deadline = Column(DateTime, nullable=True)
+    # GPT-4o-mini pool-level report generated after deadline closes
+    pool_report = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     requisition = relationship("JobRequisition", back_populates="technical_assessment_config")

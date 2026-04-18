@@ -1,5 +1,6 @@
 import re
 from sqlalchemy.orm import Session
+from models.schemas.job_schema import _sanitize_skill_list
 from agents.runner import trigger_pipeline
 
 from models.schemas.job_schema import JobRequisitionCreate
@@ -136,13 +137,13 @@ def create_full_requisition(
         db.flush()  # populate requisition_id
 
         # ── 2. requisition_required_skills ────────────────────────────────
-        for skill in _clean(data.requiredSkills):
+        for skill in _sanitize_skill_list(data.requiredSkills):
             db.add(RequisitionRequiredSkill(
                 requisition_id=requisition.requisition_id,
                 skill_name=skill,
                 skill_type="required",
             ))
-        for skill in _clean(data.preferredSkills):
+        for skill in _sanitize_skill_list(data.preferredSkills):
             db.add(RequisitionRequiredSkill(
                 requisition_id=requisition.requisition_id,
                 skill_name=skill,
