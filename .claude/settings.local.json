@@ -4,7 +4,17 @@
       "Bash(ls -1 /e/OneDrive/Desktop/recruitment-system-back/src/models/db/*.py)",
       "Bash(curl -s http://localhost:8000/)",
       "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/login -H 'Content-Type: application/json' -d '{\"email\":\"test@test.com\",\"password\":\"test\"}')",
-      "Bash(curl -s -X POST http://localhost:8000/api/v1/recruiter/login -H 'Content-Type: application/json' -d '{\"email\":\"test@test.com\",\"password\":\"test\"}')"
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/recruiter/login -H 'Content-Type: application/json' -d '{\"email\":\"test@test.com\",\"password\":\"test\"}')",
+      "Bash(python -c \"from datetime import datetime; print\\('Local date:', datetime.now\\(\\).date\\(\\)\\)\")",
+      "Bash(python -m pip show psycopg2-binary)",
+      "Bash(ls .venv/Scripts/python.exe)",
+      "Bash(ls venv/Scripts/python.exe)",
+      "Bash(../venv/Scripts/python.exe -)",
+      "Bash(venv/Scripts/python.exe -c \"import sqlalchemy; print\\(sqlalchemy.__version__\\)\")",
+      "Bash(pip show *)",
+      "Bash(where python *)",
+      "Bash(\"C:/Users/Aya/AppData/Roaming/Python/Python313/Scripts/pip.exe\" show *)",
+      "Bash(pip list *)"
     ]
   }
 }

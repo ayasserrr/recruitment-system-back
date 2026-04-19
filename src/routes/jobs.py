@@ -61,17 +61,17 @@ def check_job_deadline(requisition_id: int, db: Session) -> JobRequisition:
             detail="Job not found.",
         )
 
-    today_utc = datetime.now(timezone.utc).date()
+    today = datetime.now().date()
 
     # Opening gate: reject submissions before the job is officially live
-    if req.posting_start_date is not None and today_utc < req.posting_start_date:
+    if req.posting_start_date is not None and today < req.posting_start_date:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="NOT_YET_OPEN",
         )
 
     # Closing gate: reject submissions once the CV collection deadline has passed
-    if req.cv_collection_end_date is not None and today_utc >= req.cv_collection_end_date:
+    if req.cv_collection_end_date is not None and today > req.cv_collection_end_date:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="APPLICATION_CLOSED",
@@ -86,12 +86,12 @@ def _is_open(req: JobRequisition) -> bool:
       posting_start_date <= today < cv_collection_end_date
     If a date is not set it is treated as unbounded on that side.
     """
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now().date()
     if req.posting_start_date is not None and today < req.posting_start_date:
         return False   # job hasn't opened yet
     if req.cv_collection_end_date is None:
         return True    # no closing deadline → open indefinitely
-    return today < req.cv_collection_end_date
+    return today <= req.cv_collection_end_date
 
 
 # ── GET /api/v1/jobs/{jid} ─────────────────────────────────────────────────
@@ -180,7 +180,7 @@ def rank_candidates(
 
     # ── Deadline guard (default: ranking only makes sense after deadline) ──
     if not force and req.cv_collection_end_date is not None:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().date()
         if today < req.cv_collection_end_date:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
