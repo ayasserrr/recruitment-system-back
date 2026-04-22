@@ -392,7 +392,7 @@ def scan_and_dispatch_assessment_ranking() -> dict:
     dispatched: list[int] = []
     db = SessionLocal()
     try:
-        now = _dt.utcnow()
+        now = _dt.now()
         candidates = (
             db.query(JobRequisition)
             .join(

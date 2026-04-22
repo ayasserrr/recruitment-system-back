@@ -67,24 +67,24 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.social_tasks.scan_and_dispatch_scheduled_posts",
         "schedule": 60.0,
     },
-    # CV ranking — checked every 5 minutes (deadlines are date-based, not time-based)
-    "scan-cv-ranking-deadlines-every-5-minutes": {
+    # CV ranking — checked every minute
+    "scan-cv-ranking-deadlines-every-minute": {
         "task": "tasks.ranking_tasks.scan_and_dispatch_cv_ranking",
-        "schedule": 300.0,
+        "schedule": 60.0,
     },
-    # Assessment generation — checked every 5 minutes after ranking completes
-    "scan-assessment-generation-every-5-minutes": {
+    # Assessment generation — checked every minute after ranking completes
+    "scan-assessment-generation-every-minute": {
         "task": "tasks.assessment_tasks.scan_and_dispatch_assessment",
-        "schedule": 300.0,
+        "schedule": 60.0,
     },
     # Expire stale/abandoned assessments — checked every 30 minutes
     "expire-stale-assessments-every-30-minutes": {
         "task": "tasks.assessment_tasks.scan_and_expire_assessments",
         "schedule": 1800.0,
     },
-    # Post-deadline pool ranking + no-show marking — checked every 5 minutes
-    "scan-assessment-ranking-every-5-minutes": {
+    # Post-deadline pool ranking + no-show marking — checked every minute
+    "scan-assessment-ranking-every-minute": {
         "task": "tasks.assessment_tasks.scan_and_dispatch_assessment_ranking",
-        "schedule": 300.0,
+        "schedule": 60.0,
     },
 }

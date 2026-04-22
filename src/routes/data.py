@@ -135,7 +135,12 @@ async def upload_data(
         except (ValueError, TypeError):
             pass  # job_id is not a DB requisition_id — skip application creation
         except Exception as e:
-            logger.warning(f"Could not create application record for {company_id}/{job_id}/{candidate_id}: {e}")
+            db.rollback()
+            logger.error(f"Could not create application record for {company_id}/{job_id}/{candidate_id}: {e}")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"signal": "APPLICATION_LINK_FAILED", "detail": str(e)},
+            )
 
     except Exception as e:
         logger.error(f"Error processing CV JSON for {company_id}/{job_id}/{candidate_id}: {e}")
