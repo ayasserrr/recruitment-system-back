@@ -1,75 +1,69 @@
+_SCHEMA = """{
+  "first_name": "<string, REQUIRED>",
+  "last_name": "<string, REQUIRED>",
+  "email": "<string, REQUIRED>",
+  "phone": "<string | null>",
+  "linkedin_url": "<string | null>",
+  "portfolio_url": "<string | null>",
+  "professional_summary": "<string | null>",
+  "years_of_experience": "<integer | null>",
+  "education_level": "<highest degree, e.g. Bachelor, Master, PhD | null>",
+  "field_of_study": "<string | null>",
+  "experiences": [
+    {
+      "job_title": "<string | null>",
+      "company": "<string | null>",
+      "start_date": "<YYYY-MM-DD | null>",
+      "end_date": "<YYYY-MM-DD | null>",
+      "responsibilities": ["<string>", "..."]
+    }
+  ],
+  "educations": [
+    {
+      "institution": "<string | null>",
+      "degree": "<string | null>",
+      "field": "<string | null>",
+      "graduation_date": "<YYYY-MM-DD | null>"
+    }
+  ],
+  "projects": [
+    {
+      "project_name": "<string | null>",
+      "description": "<string | null>",
+      "tech_stack": ["<string>", "..."]
+    }
+  ],
+  "skills": [
+    {
+      "skill_name": "<string, REQUIRED>",
+      "proficiency_level": "<string | null>"
+    }
+  ]
+}"""
+
+
 def cv_system_prompt() -> str:
     return (
-        "You are an expert recruitment assistant.\n"
-        "Extract structured candidate information from CV text.\n"
-        "Always respond in valid JSON only.\n"
-        "Use empty strings/arrays when information is missing."
+        "You are a specialized ATS Parser. "
+        "Extract structured candidate data from CV text and return ONLY a valid JSON object. "
+        "No markdown fences, no explanations, no trailing commas."
     )
 
 
 def cv_user_prompt(cv_text: str) -> str:
     return (
-        "Candidate CV:\n"
-        f"{cv_text}\n\n"
-        "Extract and return ONLY valid JSON (double quotes only).\n"
-        "Do not include markdown, comments, or trailing commas.\n"
-        "Use empty strings/arrays when information is missing.\n"
-        "Schema (must match keys exactly):\n"
-        "{\n"
-        "  \"name\": \"\",\n"
-        "  \"email\": \"\",\n"
-        "  \"phone\": \"\",\n"
-        "  \"location\": \"\",\n"
-        "  \"linkedin\": \"\",\n"
-        "  \"github\": \"\",\n"
-        "  \"portfolio\": \"\",\n"
-        "  \"professional_summary\": \"\",\n"
-        "  \"experience_years\": \"\",\n"
-        "  \"current_job_title\": \"\",\n"
-        "  \"current_company\": \"\",\n"
-        "  \"education\": {\n"
-        "    \"degree\": \"\",\n"
-        "    \"major\": \"\",\n"
-        "    \"university\": \"\",\n"
-        "    \"graduation_year\": \"\"\n"
-        "  },\n"
-        "  \"experience\": [\n"
-        "    {\n"
-        "      \"job_title\": \"\",\n"
-        "      \"company\": \"\",\n"
-        "      \"start_date\": \"\",\n"
-        "      \"end_date\": \"\",\n"
-        "      \"responsibilities\": []\n"
-        "    }\n"
-        "  ],\n"
-        "  \"skills\": {\n"
-        "    \"technical\": [],\n"
-        "    \"soft\": [],\n"
-        "    \"languages\": []\n"
-        "  },\n"
-        "  \"certifications\": [\n"
-        "    {\n"
-        "      \"name\": \"\",\n"
-        "      \"issuer\": \"\",\n"
-        "      \"date\": \"\"\n"
-        "    }\n"
-        "  ],\n"
-        "  \"key_projects\": [\n"
-        "    {\n"
-        "      \"name\": \"\",\n"
-        "      \"description\": \"\",\n"
-        "      \"technologies\": []\n"
-        "    }\n"
-        "  ],\n"
-        "  \"languages\": [\n"
-        "    {\n"
-        "      \"language\": \"\",\n"
-        "      \"proficiency\": \"\"\n"
-        "    }\n"
-        "  ],\n"
-        "  \"awards\": [],\n"
-        "  \"publications\": [],\n"
-        "  \"volunteer_work\": [],\n"
-        "  \"references\": []\n"
-        "}"
+        f"CV Text:\n{cv_text}\n\n"
+        "Extract and return a JSON object that matches this exact schema:\n"
+        f"{_SCHEMA}\n\n"
+        "Strict Rules:\n"
+        "1. MANDATORY: first_name, last_name, email (top-level) and skill_name (per skill) "
+        "are NOT NULL in the database — you MUST extract them.\n"
+        "2. DATA TYPES: years_of_experience must be an integer. "
+        "All date fields must use YYYY-MM-DD format; use null if unknown or ongoing.\n"
+        "3. NO HALLUCINATIONS: set any non-mandatory missing field to null.\n"
+        "4. CLEAN OUTPUT: remove emojis and fix encoding artifacts.\n"
+        "5. SKILLS: return each distinct skill as a separate object with skill_name "
+        "and an optional proficiency_level.\n"
+        "6. RESPONSIBILITIES: return as a JSON array of concise bullet strings.\n"
+        "7. TECH STACK: return as a JSON array of technology names."
     )

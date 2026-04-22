@@ -11,7 +11,7 @@ import httpx
 
 from .BaseController import BaseController
 from .CompanyController import CompanyController
-from .processController import ProcessController
+from .ProcessController import ProcessController
 from models.prompts import rank_system_prompt, rank_user_prompt
 
 

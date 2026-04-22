@@ -4,6 +4,7 @@ import aiofiles
 import logging
 import json
 from pathlib import Path
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from helpers import get_settings, settings
 from controllers import CompanyController, DataController, ProcessController
@@ -79,7 +80,7 @@ async def upload_data(
 
     process_controller = ProcessController()
     try:
-        cv_json = await process_controller.extract_candidate_cv_json(
+        cv_parsed = await process_controller.extract_candidate_cv_json(
             company_id=company_id,
             job_id=job_id,
             candidate_id=candidate_id,
@@ -94,7 +95,7 @@ async def upload_data(
         cv_json_path: Path = candidate_dir / f"{candidate_id}_cv.json"
 
         async with aiofiles.open(cv_json_path, "w", encoding="utf-8") as f:
-            await f.write(json.dumps(cv_json, ensure_ascii=False, indent=2))
+            await f.write(json.dumps(cv_parsed.model_dump(), ensure_ascii=False, indent=2))
 
         # Persist parsed CV data to database.
         # candidate_id path param is the DB integer assigned at registration.
@@ -104,7 +105,7 @@ async def upload_data(
             registered_id = None
 
         db_candidate_id, db_cv_id = CVPersistenceService().persist(
-            cv_json=cv_json,
+            cv_parsed=cv_parsed,
             db=db,
             file_url=str(file_path),
             registered_candidate_id=registered_id,
@@ -142,6 +143,25 @@ async def upload_data(
                 content={"signal": "APPLICATION_LINK_FAILED", "detail": str(e)},
             )
 
+    except ValidationError as e:
+        logger.warning(f"CV parsing incomplete for {company_id}/{job_id}/{candidate_id}: {e}")
+        missing = [
+            str(err["loc"][0])
+            for err in e.errors()
+            if err.get("loc")
+        ]
+        friendly = (
+            f"The CV is missing required information: {', '.join(missing)}. "
+            "Please ensure the document clearly states the candidate's full name and email address."
+        ) if missing else "The CV could not be parsed — required fields are missing."
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "signal": "CV_PARSING_INCOMPLETE_DATA",
+                "detail": friendly,
+                "file_id": file_id,
+            },
+        )
     except Exception as e:
         logger.error(f"Error processing CV JSON for {company_id}/{job_id}/{candidate_id}: {e}")
         return JSONResponse(
@@ -172,7 +192,7 @@ async def upload_data(
             "signal": ResponseSignal.FILE_UPLOADED_SUCCESSFULLY.value,
             "file_id": file_id,
             "cv_json_path": str(cv_json_path),
-            "cv_json": cv_json,
+            "cv_json": cv_parsed.model_dump(),
             "db_candidate_id": db_candidate_id,
             "db_cv_id": db_cv_id,
         }
