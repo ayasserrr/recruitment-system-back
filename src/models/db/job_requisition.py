@@ -33,6 +33,8 @@ class JobRequisition(Base):
     shortlist_notified = Column(Boolean, nullable=True, default=False)
     assessment_generated = Column(Boolean, default=False)
     assessment_generated_at = Column(DateTime, nullable=True)
+    hr_report_path = Column(String(500), nullable=True)
+    results_json_path = Column(String(500), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -47,3 +49,5 @@ class JobRequisition(Base):
     hr_interview_config = relationship("HRInterviewConfig", back_populates="requisition", uselist=False)
     generated_questions = relationship("GeneratedAssessmentQuestion", back_populates="job_requisition")
     question_sets = relationship("AssessmentQuestionSet", back_populates="job_requisition")
+    leaderboard_entries = relationship("AssessmentLeaderboard", back_populates="job_requisition")
+    knowledge_gaps = relationship("JrKnowledgeGap", back_populates="job_requisition")

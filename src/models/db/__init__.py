@@ -35,3 +35,5 @@ from models.db.pipeline_stage_log import PipelineStageLog
 from models.db.company_social_auth import CompanySocialAuth
 from models.db.generated_assessment_question import GeneratedAssessmentQuestion
 from models.db.assessment_question_set import AssessmentQuestionSet
+from models.db.assessment_leaderboard import AssessmentLeaderboard
+from models.db.jr_knowledge_gap import JrKnowledgeGap

@@ -1,0 +1,15 @@
+weights:
+  coverage: 0.60
+  depth: 0.40
+
+thresholds:
+  semantic_fallback: 0.72   # GPT confidence floor for semantic keyword recovery
+  tiebreak_margin: 0.05     # score diff that triggers tiebreak
+
+tiebreaker:
+  runs: 3                   # best-of-N voting
+  temperature: 0            # deterministic
+
+segments:
+  pass_threshold: 0.50
+  shortlist: 0.75

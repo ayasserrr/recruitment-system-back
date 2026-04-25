@@ -495,9 +495,87 @@ def process_assessment_ranking(self, requisition_id: int) -> dict:
     finally:
         db.close()
 
+    # Dispatch the relative grading pipeline now that no-shows are marked
+    # and the basic pool ranking is done.
+    run_relative_grading.delay(requisition_id)
+    logger.info(
+        "[ranking_worker] Dispatched relative grading for requisition %d.", requisition_id
+    )
+
     return {
         "requisition_id": requisition_id,
         "success": True,
         "no_show_count": result["no_show_count"],
         "ranked_count": result["ranked_count"],
+    }
+
+
+# ── Worker task: 3-phase relative grading ─────────────────────────────────────
+
+@celery_app.task(
+    name="tasks.assessment_tasks.run_relative_grading",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=180,
+)
+def run_relative_grading(self, requisition_id: int) -> dict:
+    """
+    Worker task — runs the 3-phase relative auto-grading pipeline
+    for all submitted candidates of a requisition:
+
+      Phase 1: Keyword coverage with GPT-4o-mini semantic fallback
+      Phase 2: Comparative depth scoring (normalised against pool max)
+      Phase 3: Ranking, rejection, tiebreaking
+
+    Saves results to assessment_leaderboards and generates hr_report.xlsx.
+    Idempotent: clears previous leaderboard entries before writing new ones.
+    """
+    from services.relative_grading.logger import setup_grading_logger
+    from services.relative_grading.runner import run_relative_grading_pipeline
+
+    setup_grading_logger()
+    logger.info(
+        "[relative_grading] Starting 3-phase pipeline for requisition %d.", requisition_id
+    )
+
+    db = SessionLocal()
+    try:
+        result = run_relative_grading_pipeline(requisition_id, db)
+    except Exception as exc:
+        logger.exception(
+            "[relative_grading] Unhandled exception for requisition %d — retrying.",
+            requisition_id,
+        )
+        raise self.retry(exc=exc, countdown=180 * (self.request.retries + 1))
+    finally:
+        db.close()
+
+    if result.get("error"):
+        logger.error(
+            "[relative_grading] Pipeline error for requisition %d: %s",
+            requisition_id, result["error"],
+        )
+        return {
+            "requisition_id": requisition_id,
+            "success": False,
+            "error": result["error"],
+        }
+
+    logger.info(
+        "[relative_grading] Done. requisition=%d | passed=%d rejected=%d top=%s@%.3f",
+        requisition_id,
+        result["n_passed"],
+        result["n_rejected"],
+        result.get("top_candidate") or "—",
+        result.get("top_score") or 0.0,
+    )
+
+    return {
+        "requisition_id": requisition_id,
+        "success": True,
+        "n_passed": result["n_passed"],
+        "n_rejected": result["n_rejected"],
+        "top_candidate": result.get("top_candidate"),
+        "top_score": result.get("top_score"),
+        "report_path": result.get("report_path"),
     }

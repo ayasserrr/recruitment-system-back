@@ -52,6 +52,7 @@ from models.db.candidate_assessment import CandidateAssessment
 from models.db.generated_assessment_question import GeneratedAssessmentQuestion
 from models.db.job_posting import JobPosting
 from models.db.job_requisition import JobRequisition
+from models.db.jr_knowledge_gap import JrKnowledgeGap
 from models.db.requisition_required_skill import RequisitionRequiredSkill
 from models.db.technical_assessment_config import TechnicalAssessmentConfig
 from services.reviewer_service import regenerate_failed_questions, review_questions
@@ -179,25 +180,32 @@ def _map_seniority_to_level(seniority: str) -> ConceptLevel:
     return ConceptLevel.high  # senior, lead, principal, staff, etc.
 
 
-def _load_concepts_from_knowledge_db(
+def _load_concepts_and_gaps(
     skill_names: list[str],
     level: ConceptLevel,
-) -> list[dict]:
+) -> tuple[list[dict], list[str]]:
     """
-    Step 2 — map each skill name to a Tool in the knowledge DB (fuzzy match).
+    Step 2 — fuzzy-match each skill name to a Tool in the knowledge DB.
     Step 3 — retrieve Concepts for matched tools at the given level.
-    Returns a list of concept dicts used as the LLM Ground Truth.
+
+    Returns:
+      (concepts, unmatched_skills)
+      concepts         — list of concept dicts for use as LLM Ground Truth
+      unmatched_skills — skill names that had no match in the knowledge DB;
+                         these will be generated via AI general knowledge and
+                         recorded in jr_knowledge_gaps.
     """
     if not skill_names:
-        return []
+        return [], []
 
     concepts_out: list[dict] = []
+    matched_skills: set[str] = set()
 
     try:
         with KnowledgeSession(knowledge_engine) as ks:
             all_tools: list[Tool] = ks.exec(select(Tool)).all()
-
             matched_tool_ids: set[int] = set()
+
             for skill in skill_names:
                 skill_lower = skill.lower().strip()
                 skill_slug = skill_lower.replace(" ", "-")
@@ -211,30 +219,20 @@ def _load_concepts_from_knowledge_db(
                         or tool.name.lower() in skill_lower
                     ):
                         matched_tool_ids.add(tool.id)
+                        matched_skills.add(skill)
                         break
 
-            if not matched_tool_ids:
+            unmatched_skills = [s for s in skill_names if s not in matched_skills]
+            if unmatched_skills:
                 logger.warning(
-                    "[knowledge_db] No tools matched for skills: %s. "
-                    "Falling back to all concepts at level %s.",
-                    ", ".join(skill_names), level.value,
+                    "[knowledge_db] %d skill(s) not found in knowledge DB — will use "
+                    "AI general knowledge: %s",
+                    len(unmatched_skills), ", ".join(unmatched_skills),
                 )
-                # Broad fallback: grab any concepts at the target level
-                fallback_concepts: list[Concept] = ks.exec(
-                    select(Concept).where(Concept.level == level).limit(30)
-                ).all()
-                tool_map = {t.id: t for t in all_tools}
-                for c in fallback_concepts:
-                    tool = tool_map.get(c.tool_id)
-                    concepts_out.append({
-                        "concept_id": c.id,
-                        "tool_id": c.tool_id,
-                        "tool_name": tool.name if tool else "Unknown",
-                        "level": c.level.value,
-                        "concept_name": c.name,
-                        "notes": c.notes or "",
-                    })
-                return concepts_out
+
+            if not matched_tool_ids:
+                # All skills are external — return early with empty concepts
+                return [], unmatched_skills
 
             # Fetch concepts for matched tools at the target level
             matched_concepts: list[Concept] = ks.exec(
@@ -244,7 +242,7 @@ def _load_concepts_from_knowledge_db(
                 )
             ).all()
 
-            # If nothing at that exact level, widen to all levels for those tools
+            # Widen to all levels if the exact level has no concepts
             if not matched_concepts:
                 logger.info(
                     "[knowledge_db] No concepts at level '%s' for matched tools — widening search.",
@@ -268,9 +266,14 @@ def _load_concepts_from_knowledge_db(
 
     except Exception as exc:
         logger.error("[knowledge_db] Failed to load concepts: %s", exc)
+        # Treat all skills as unmatched so generation can still proceed
+        return [], list(skill_names)
 
-    logger.info("[knowledge_db] Loaded %d concepts as Ground Truth.", len(concepts_out))
-    return concepts_out
+    logger.info(
+        "[knowledge_db] Loaded %d concepts (matched). Unmatched skills: %d.",
+        len(concepts_out), len(unmatched_skills),
+    )
+    return concepts_out, unmatched_skills
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,56 +282,110 @@ def _load_concepts_from_knowledge_db(
 
 def _build_knowledge_question_prompt(
     concepts: list[dict],
+    unmatched_skills: list[str],
     seniority: str,
     job_title: str,
 ) -> list[dict]:
     """
-    Build the prompt using retrieved concepts as the Ground Truth.
-    The LLM must NOT invent topics outside this list.
+    Build the combined LLM prompt.
+
+    Matched tools → injected as Ground Truth (concept name + notes).
+    Unmatched skills → listed under EXTERNAL SKILLS; LLM uses general knowledge.
+    All questions must include required_keywords regardless of source.
     """
+    has_ground_truth = bool(concepts)
+    has_external = bool(unmatched_skills)
+
     ground_truth_lines = [
         f"- [{c['tool_name']} | {c['level']}] {c['concept_name']}: {c['notes'] or '(no additional notes)'}"
         for c in concepts
     ]
-    ground_truth = "\n".join(ground_truth_lines)
+    ground_truth_block = (
+        "GROUND TRUTH — questions sourced from internal knowledge DB:\n"
+        + "\n".join(ground_truth_lines)
+        if has_ground_truth
+        else ""
+    )
+
+    external_lines = [f"- {s} ({seniority} level)" for s in unmatched_skills]
+    external_block = (
+        "EXTERNAL SKILLS — not in internal DB; use AI general knowledge for these:\n"
+        + "\n".join(external_lines)
+        + "\n"
+        + "  For external skill questions: set tool_name = exact skill name above, "
+        + "concept_name = '<YourConceptName> [External Knowledge]'."
+        if has_external
+        else ""
+    )
+
+    sections = "\n\n".join(filter(None, [ground_truth_block, external_block]))
+
+    if has_ground_truth and has_external:
+        q_source_rule = (
+            f"2. Distribute {_TOTAL_QUESTIONS} questions proportionally across Ground Truth "
+            f"concepts AND External Skills. Every listed skill/concept must appear in at least "
+            f"one question.\n"
+            f"   Ground Truth questions: MUST use concept names/tools from the list above.\n"
+            f"   External Knowledge questions: use your best general knowledge for those skills."
+        )
+        system_extra = (
+            "You have both internal Ground Truth concepts AND external skills to cover. "
+            "Use Ground Truth for known tools; use your general knowledge for external skills."
+        )
+    elif has_external:
+        q_source_rule = (
+            f"2. Generate all {_TOTAL_QUESTIONS} questions using your general AI knowledge "
+            f"for the listed external skills. Every listed skill must appear in at least one question."
+        )
+        system_extra = (
+            "No internal knowledge DB concepts are available. "
+            "Use your general technical knowledge for all questions."
+        )
+    else:
+        q_source_rule = (
+            f"2. Every question MUST directly test one or more concepts from the Ground Truth above. "
+            f"Never invent topics outside this list."
+        )
+        system_extra = (
+            "You MUST generate questions ONLY from the Ground Truth concepts provided. "
+            "Do NOT introduce tools, topics, or technologies not listed in the Ground Truth."
+        )
 
     system_msg = (
         "You are a principal-level technical interviewer writing a high-stakes screening assessment. "
         "You ONLY respond with a valid JSON array — no markdown, no prose, no explanation, no emojis. "
-        "You MUST generate questions ONLY from the Ground Truth concepts provided. "
-        "Do NOT introduce tools, topics, or technologies not listed in the Ground Truth."
+        + system_extra
     )
 
     user_msg = (
         f"Design a rigorous technical assessment for a {seniority}-level {job_title} role.\n\n"
-        f"GROUND TRUTH — base ALL questions ONLY on these concepts:\n"
-        f"{ground_truth}\n\n"
+        f"{sections}\n\n"
         f"STRICT REQUIREMENTS:\n"
         f"1. Generate EXACTLY {_TOTAL_QUESTIONS} questions — no more, no less.\n"
-        f"2. Every question MUST directly test one or more concepts from the Ground Truth above. "
-        f"   Never invent topics outside this list.\n"
+        f"{q_source_rule}\n"
         f"3. Synthesize multiple concepts when possible: trade-offs, debugging scenarios, "
-        f"   architectural decisions that span several listed concepts.\n"
+        f"   architectural decisions.\n"
         f"4. Question types: exactly 9 MCQ and 6 open_ended.\n"
         f"5. Complexity: scenario-based problems, production debugging, architectural trade-offs. "
         f"   PROHIBIT 'What is X?' or 'Define X' style questions.\n"
         f"6. No emojis. No decorative symbols. Plain, precise, technical English only.\n"
         f"7. For MCQ: correct_answer = the letter only (A, B, C, or D). "
-        f"   required_keywords = [correct_letter, plus 2-4 key concept terms from the Ground Truth].\n"
+        f"   required_keywords = [correct_letter, plus 2-4 key concept terms].\n"
         f"8. For open_ended: correct_answer = a concise model answer (3-5 sentences). "
         f"   required_keywords = list of 3-6 key technical terms the answer MUST contain.\n"
         f"9. Each MCQ option must be technically distinct and plausible — no obvious distractors.\n"
-        f"10. concept_name: MUST be the exact concept name from the Ground Truth that this question tests "
-        f"    (use the first concept if the question spans multiple).\n"
-        f"11. tool_name: MUST match exactly the tool name from the Ground Truth.\n\n"
+        f"10. concept_name: the concept this question tests. For Ground Truth use the exact "
+        f"    concept name. For external skills use '<concept> [External Knowledge]'.\n"
+        f"11. tool_name: for Ground Truth use exact tool name; for external skills use the exact "
+        f"    skill name listed under EXTERNAL SKILLS.\n\n"
         f"Output MUST be a valid JSON array of exactly {_TOTAL_QUESTIONS} objects. Each object:\n"
         f"  - question_text: string\n"
         f"  - question_type: \"mcq\" or \"open_ended\"\n"
         f"  - options: [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"] for mcq, null for open_ended\n"
         f"  - correct_answer: string (letter only for mcq; concise model answer for open_ended)\n"
-        f"  - required_keywords: list[str]\n"
-        f"  - concept_name: string (exact name from Ground Truth)\n"
-        f"  - tool_name: string (exact tool from Ground Truth)\n"
+        f"  - required_keywords: list[str]  ← REQUIRED for every question, including MCQ\n"
+        f"  - concept_name: string\n"
+        f"  - tool_name: string\n"
         f"  - ai_grading_guide: string (1-3 sentences: key concepts required + partial vs full credit)\n\n"
         f"Respond with ONLY the JSON array. Begin immediately with '['."
     )
@@ -471,26 +528,19 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
 
         skill_names = [s["skill_name"] for s in skills]
 
-        # ── Step 2 & 3: load concepts from knowledge DB as Ground Truth ──────
+        # ── Step 2 & 3: load concepts + identify unmatched skills ────────────
         level = _map_seniority_to_level(seniority)
-        concepts = _load_concepts_from_knowledge_db(skill_names, level)
-
-        if not concepts:
-            logger.warning(
-                "[assessment_gen] Knowledge DB returned no concepts for requisition %d — "
-                "falling back to skill-only prompt.",
-                req_id,
-            )
-            # Fallback: generate questions from skill names alone (old behaviour)
-            return _generate_from_skills_fallback(state, db, existing_template_id, skill_names, seniority, company_id, job_title, req_id, config_id)
+        concepts, unmatched_skills = _load_concepts_and_gaps(skill_names, level)
 
         logger.info(
-            "[assessment_gen] Generating %d questions for requisition %d from %d Ground Truth concepts.",
-            _TOTAL_QUESTIONS, req_id, len(concepts),
+            "[assessment_gen] Requisition %d — %d knowledge DB concept(s), "
+            "%d external skill(s): %s",
+            req_id, len(concepts), len(unmatched_skills),
+            ", ".join(unmatched_skills) if unmatched_skills else "none",
         )
 
-        # ── Step 4: call LLM ─────────────────────────────────────────────────
-        messages = _build_knowledge_question_prompt(concepts, seniority, job_title)
+        # ── Step 4: call LLM (combined Ground Truth + External prompt) ───────
+        messages = _build_knowledge_question_prompt(concepts, unmatched_skills, seniority, job_title)
         raw_response = _llm_call(messages)
 
         # ── Create / reuse AssessmentTemplate (for grading compatibility) ─────
@@ -525,10 +575,13 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
 
         # Build concept lookup by name for metadata enrichment
         concept_by_name = {c["concept_name"].lower(): c for c in concepts}
+        # Set of unmatched skill names (lowercase) for fast external-question detection
+        unmatched_lower: set[str] = {s.lower() for s in unmatched_skills}
 
         if raw_response is None:
             logger.warning("[assessment_gen] LLM returned None — saving fallback questions.")
             _save_fallback_questions_dual(db, template_id, req_id, skill_names[0], seniority, concepts)
+            _record_knowledge_gaps(db, req_id, unmatched_skills)
             _mark_jr_generated(db, req_id)
             db.commit()
             return {**state, "questions_generated": True, "template_id": template_id}
@@ -540,6 +593,7 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
                 req_id,
             )
             _save_fallback_questions_dual(db, template_id, req_id, skill_names[0], seniority, concepts)
+            _record_knowledge_gaps(db, req_id, unmatched_skills)
             _mark_jr_generated(db, req_id)
             db.commit()
             return {**state, "questions_generated": True, "template_id": template_id}
@@ -603,11 +657,22 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
                 q_concept_name = str(q.get("concept_name") or skill_names[0])
                 q_tool_name = str(q.get("tool_name") or skill_names[0])
 
-                # Enrich with knowledge DB metadata
-                matched_concept = concept_by_name.get(q_concept_name.lower())
-                concept_id = matched_concept["concept_id"] if matched_concept else None
-                tool_id = matched_concept["tool_id"] if matched_concept else 0
-                concept_level = matched_concept["level"] if matched_concept else level.value
+                # Determine knowledge source: external if tool_name matches an unmatched skill
+                is_external = q_tool_name.lower() in unmatched_lower
+
+                if is_external:
+                    # External knowledge question — no knowledge DB link
+                    concept_id = None
+                    tool_id = 0
+                    concept_level = level.value
+                    if "[External Knowledge]" not in q_concept_name:
+                        q_concept_name = f"{q_concept_name} [External Knowledge]"
+                else:
+                    # Enrich with knowledge DB metadata
+                    matched_concept = concept_by_name.get(q_concept_name.lower())
+                    concept_id = matched_concept["concept_id"] if matched_concept else None
+                    tool_id = matched_concept["tool_id"] if matched_concept else 0
+                    concept_level = matched_concept["level"] if matched_concept else level.value
 
                 # Mirror into AssessmentTemplateQuestion for grading pipeline
                 stored_correct_answer = correct_answer
@@ -656,13 +721,14 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
             except Exception as exc:
                 logger.warning("[assessment_gen] Skipping malformed question at position %d: %s", position, exc)
 
+        _record_knowledge_gaps(db, req_id, unmatched_skills)
         _mark_jr_generated(db, req_id)
         db.commit()
 
         logger.info(
-            "[assessment_gen] Saved %d/%d knowledge-grounded questions for requisition %d "
-            "(template %d).",
-            total_saved, _TOTAL_QUESTIONS, req_id, template_id,
+            "[assessment_gen] Saved %d/%d questions for requisition %d (template %d). "
+            "External knowledge questions: %d skill(s).",
+            total_saved, _TOTAL_QUESTIONS, req_id, template_id, len(unmatched_skills),
         )
         return {**state, "questions_generated": True, "template_id": template_id}
 
@@ -679,6 +745,27 @@ def _mark_jr_generated(db, req_id: int) -> None:
     if jr:
         jr.assessment_generated = True
         jr.assessment_generated_at = datetime.utcnow()
+
+
+def _record_knowledge_gaps(db, req_id: int, unmatched_skills: list[str]) -> None:
+    """
+    Idempotent: deletes existing gap rows for this JR then inserts fresh ones.
+    No-op when unmatched_skills is empty.
+    """
+    if not unmatched_skills:
+        return
+    db.query(JrKnowledgeGap).filter(JrKnowledgeGap.jr_id == req_id).delete(synchronize_session=False)
+    for skill in unmatched_skills:
+        db.add(JrKnowledgeGap(
+            jr_id=req_id,
+            tool_name=skill,
+            status="Missing in DB - LLM Generated",
+        ))
+    db.flush()
+    logger.info(
+        "[assessment_gen] Recorded %d knowledge gap(s) for requisition %d: %s",
+        len(unmatched_skills), req_id, ", ".join(unmatched_skills),
+    )
 
 
 def _generate_from_skills_fallback(
@@ -720,15 +807,17 @@ def _generate_from_skills_fallback(
     messages = _build_legacy_question_prompt(skill_names, seniority, job_title)
     raw = _llm_call(messages)
 
+    skill_label = skill_names[0] if skill_names else "unknown"
+
     if raw is None:
-        _save_fallback_questions(db, template_id, skill_names[0], seniority)
+        _save_fallback_questions_dual(db, template_id, req_id, skill_label, seniority, [])
         _mark_jr_generated(db, req_id)
         db.commit()
         return {**state, "questions_generated": True, "template_id": template_id}
 
     parsed, ok = _parse_json_response(raw)
     if not ok or not isinstance(parsed, list) or len(parsed) == 0:
-        _save_fallback_questions(db, template_id, skill_names[0], seniority)
+        _save_fallback_questions_dual(db, template_id, req_id, skill_label, seniority, [])
         _mark_jr_generated(db, req_id)
         db.commit()
         return {**state, "questions_generated": True, "template_id": template_id}
@@ -742,13 +831,30 @@ def _generate_from_skills_fallback(
             ai_grading_guide = q.get("ai_grading_guide") or ""
             if q_type == "open_ended" and ai_grading_guide:
                 correct_answer = json.dumps({"answer": correct_answer, "grading_guide": ai_grading_guide})
-            db.add(AssessmentTemplateQuestion(
+            q_text = str(q.get("question_text", ""))
+            tq = AssessmentTemplateQuestion(
                 template_id=template_id,
-                question_text=str(q.get("question_text", "")),
+                question_text=q_text,
                 question_type=q_type,
                 points=10,
                 correct_answer=correct_answer,
                 options=options_json,
+            )
+            db.add(tq)
+            db.flush()  # materialise question_id before inserting GeneratedAssessmentQuestion
+
+            db.add(GeneratedAssessmentQuestion(
+                jr_id=req_id,
+                concept_id=None,
+                tool_id=0,
+                tool_name=skill_label,
+                level=seniority.lower(),
+                concept_name=skill_label,
+                question_text=q_text,
+                question_type=q_type,
+                required_keywords=[],
+                is_active=True,
+                template_question_id=tq.question_id,
             ))
         except Exception as exc:
             logger.warning("[assessment_gen_fallback] Skipping malformed question: %s", exc)
