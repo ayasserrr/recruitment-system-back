@@ -11,11 +11,11 @@ from models.db.cv_education import CVEducation
 from models.db.cv_experience import CVExperience
 from models.db.cv_project import CVProject
 from models.db.cv_skill import CVSkill
-from models.schemas.cv_schema import ParsedCVSchema
+from schemas.cv_schema import ParsedCV
 
 
 class CVPersistenceService:
-    """Persists a validated ParsedCVSchema into the relational database."""
+    """Persists a validated ParsedCV into the relational database."""
 
     def _parse_date(self, value: object) -> Optional[date]:
         if not value:
@@ -32,12 +32,12 @@ class CVPersistenceService:
 
     def persist(
         self,
-        cv_parsed: ParsedCVSchema,
+        cv_parsed: ParsedCV,
         db: Session,
         file_url: str = "",
         registered_candidate_id: Optional[int] = None,
     ) -> tuple[int, int]:
-        """Map a validated ParsedCVSchema to DB rows within a single transaction.
+        """Map a validated ParsedCV to DB rows within a single transaction.
 
         Returns (candidate_id, cv_id). Rolls back on any failure.
         """
@@ -53,7 +53,7 @@ class CVPersistenceService:
 
     def _persist_internal(
         self,
-        cv_parsed: ParsedCVSchema,
+        cv_parsed: ParsedCV,
         db: Session,
         file_url: str,
         registered_candidate_id: Optional[int],

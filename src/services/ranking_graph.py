@@ -44,11 +44,65 @@ import logging
 import re
 import time
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional, TypedDict
 
 import httpx
 from langgraph.graph import END, StateGraph
 from sqlalchemy.orm import joinedload
+
+# Optional: embedding_service provides CE reranking + hybrid scoring.
+# Imported lazily-guarded so the pipeline still runs without sentence-transformers.
+try:
+    from services.embedding_service import (  # type: ignore
+        rerank as _ce_rerank,
+        hybrid_score as _hybrid_score,
+        sigmoid as _ce_sigmoid,
+        encode_jd as _encode_jd,
+        encode_cvs_batch as _encode_cvs_batch,
+        validate_embedding_quality as _validate_embedding_quality,
+    )
+    _EMBEDDING_SERVICE_AVAILABLE = True
+except ImportError:
+    _EMBEDDING_SERVICE_AVAILABLE = False
+    logger_import = logging.getLogger(__name__)
+    logger_import.warning(
+        "[ranking_graph] embedding_service not importable — "
+        "CE reranking disabled; pipeline uses deterministic scoring only."
+    )
+
+# Optional: qdrant_service provides persistent Top-K retrieval per JD.
+try:
+    from services.qdrant_service import (  # type: ignore
+        upsert_cvs_batch as _qdrant_upsert_cvs_batch,
+        search_for_jd as _qdrant_search_for_jd,
+        delete_jd_vectors as _qdrant_delete_jd_vectors,
+    )
+    _QDRANT_AVAILABLE = True
+except ImportError:
+    _QDRANT_AVAILABLE = False
+    logger_import_qdrant = logging.getLogger(__name__)
+    logger_import_qdrant.warning(
+        "[ranking_graph] qdrant_service not importable — "
+        "vector retrieval disabled; pipeline ranks full pool."
+    )
+
+# Optional: xai_service provides SHAP (AutoTokenizer masker) + HR explanation card.
+# Imported lazily-guarded so the pipeline still runs without shap/transformers.
+try:
+    from services.xai_service import (  # type: ignore
+        build_shap_explainer as _build_shap_explainer,
+        generate_explanations_for_pool as _generate_explanations_for_pool,
+        SHAP_K as _XAI_SHAP_K,
+    )
+    _XAI_SERVICE_AVAILABLE = True
+except ImportError:
+    _XAI_SERVICE_AVAILABLE = False
+    logger_import_xai = logging.getLogger(__name__)
+    logger_import_xai.warning(
+        "[ranking_graph] xai_service not importable — "
+        "HR explanation cards + SHAP disabled; pipeline persists scoring only."
+    )
 
 from database.connection import SessionLocal
 from helpers.config import get_settings
@@ -64,12 +118,76 @@ from models.db.semantic_matched_skill import SemanticMatchedSkill
 logger = logging.getLogger(__name__)
 
 
+# ── Output artifacts (idempotent per requisition_id) ─────────────────────────
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+_OUTPUT_DIR = _PROJECT_ROOT / "output"
+
+
+def _cleanup_stale_artifacts(jr_id: int) -> None:
+    """Delete any existing output artifacts for this requisition from output/."""
+    if not _OUTPUT_DIR.exists():
+        return
+    prefixes = (f"hr_report_jr{jr_id}_", f"results_jr{jr_id}_")
+    removed = 0
+    for f in _OUTPUT_DIR.iterdir():
+        if f.is_file() and f.name.startswith(prefixes):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError as exc:
+                logger.warning("[ranking_graph] Could not delete stale file %s: %s", f, exc)
+    if removed:
+        logger.info("[ranking_graph] Removed %d stale artifact(s) for jr_id=%d.", removed, jr_id)
+
+
+def _write_results_json(jr_id: int, jd: dict, ranked: list[dict]) -> str:
+    """Write ranking results JSON to output/ and return absolute path string."""
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    out_path = _OUTPUT_DIR / f"results_jr{jr_id}_{timestamp}.json"
+
+    serialisable = []
+    for c in ranked:
+        serialisable.append({
+            "application_id": c.get("application_id"),
+            "candidate_id": c.get("candidate_id"),
+            "candidate_name": c.get("candidate_name"),
+            "email": c.get("email"),
+            "rank_in_pool": c.get("rank_in_pool"),
+            "total_in_pool": c.get("total_in_pool"),
+            "final_score": float(c.get("final_score")) if c.get("final_score") is not None else None,
+            "recommendation": c.get("recommendation"),
+            "ce_logit": c.get("ce_logit"),
+            "ce_prob": c.get("ce_prob"),
+            "hybrid_score": c.get("hybrid_score"),
+            "hr_explanation_json": c.get("hr_explanation_json"),
+        })
+
+    payload = {
+        "jr_id": jr_id,
+        "generated_at": datetime.utcnow().isoformat(),
+        "job_title": jd.get("job_title"),
+        "ranked_candidates": serialisable,
+    }
+    out_path.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
+    logger.info("[ranking_graph] results.json written: %s", out_path)
+    return str(out_path)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
 _OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 _OPENAI_MODEL = "gpt-4o-mini"
+
+# ── Label thresholds (Gold Standard FIT_THRESHOLD / PARTIAL_THRESHOLD) ────────
+FIT_THRESHOLD     = 0.80   # skill overlap ≥ 80% → good_fit
+PARTIAL_THRESHOLD = 0.40   # skill overlap ≥ 40% → partial_fit; < 40% → no_fit
+
+# ── Pipeline configuration (Gold Standard TOP_K / SHAP_K) ─────────────────────
+TOP_K  = 20  # Bi-Encoder candidates passed to Cross-Encoder
+SHAP_K = 5   # SHAP / attribution computed only for top-SHAP_K results
 
 # Degree hierarchy — index 0 is lowest
 _EDUCATION_HIERARCHY = [
@@ -120,7 +238,8 @@ _SKILL_SYNONYMS: dict[str, list[str]] = {
     "computer vision": [
         "computer vision", "image classification", "image segmentation",
         "object detection", "object recognition", "image processing", "cnn",
-        "convolutional", "yolo", "opencv", "cv2", "visual recognition",
+        "convolutional", "yolo", "yolov5", "yolov7", "yolov8", "yolov9",
+        "ultralytics", "opencv", "cv2", "visual recognition",
         "image analysis", "bounding box", "detection model", "mediapipe",
         "ocr", "facial recognition", "semantic segmentation", "easyocr", "paddleocr",
     ],
@@ -186,6 +305,50 @@ _SKILL_SYNONYMS: dict[str, list[str]] = {
     "azure": ["microsoft azure", "ms azure", "azure ml", "azure openai"],
     "sql": ["mysql", "postgresql", "postgres", "sqlite", "relational database", "t-sql"],
     "api": ["rest api", "restful", "graphql", "fastapi", "flask", "django"],
+    # Extended skill groups derived from Gold Standard notebook
+    "mongodb": ["mongodb", "mongo", "mongodb atlas", "nosql", "document database", "document store"],
+    "redis": ["redis", "redis cache", "caching layer", "in-memory cache", "memcached"],
+    "nodejs": ["node.js", "nodejs", "node", "express.js", "express", "deno"],
+    "graphql": ["graphql", "apollo", "hasura", "graphql api", "graphql schema"],
+    "microservices": ["microservice", "microservices", "service oriented", "service mesh", "service-oriented"],
+    "time_series": [
+        "time series", "time-series", "forecasting", "arima", "temporal data",
+        "lstm", "sequence modeling", "trend analysis", "anomaly detection time",
+    ],
+    "web_scraping": [
+        "web scraping", "beautifulsoup", "selenium", "scrapy", "crawling",
+        "data extraction", "web crawler", "puppeteer", "playwright",
+    ],
+    "streaming": [
+        "kafka", "spark streaming", "flink", "rabbitmq", "event streaming",
+        "message queue", "pub/sub", "kinesis", "event-driven",
+    ],
+    "system_design": [
+        "system design", "architecture design", "high level design", "hld",
+        "system architecture", "designed architecture", "software architecture",
+    ],
+    "leadership": [
+        "led team", "managed team", "team lead", "tech lead", "engineering lead",
+        "mentored", "supervised team", "team of", "led the development",
+    ],
+    "security": [
+        "jwt", "oauth", "authentication system", "authorization", "role-based access",
+        "rbac", "encryption", "secure api", "https", "ssl", "tls",
+    ],
+    "git": ["git", "github", "gitlab", "bitbucket", "version control", "source control"],
+    "agile": ["agile", "scrum", "sprint", "kanban", "jira", "confluence", "standup", "agile workflow"],
+    "recommendation_systems": [
+        "recommendation system", "recommender system", "collaborative filtering",
+        "content-based filtering", "matrix factorization",
+    ],
+    "workflow_orchestration": [
+        "airflow", "luigi", "prefect", "dbt", "workflow orchestration",
+        "pipeline orchestration", "celery", "task queue",
+    ],
+    "javascript": [
+        "javascript", "js", "typescript", "ts", "react", "vue", "angular",
+        "nextjs", "next.js", "svelte", "frontend",
+    ],
 }
 
 # Bonus / nice-to-have skills
@@ -295,6 +458,359 @@ _DEPLOY_SIGNALS: dict[str, list[str]] = {
     ],
 }
 
+# ── Implicit skill inference patterns (Gold Standard PROJECT_SKILL_PATTERNS) ──
+# 36 regex patterns across 10 categories that detect skills demonstrated in
+# project/experience text even when not explicitly listed in the CV skills section.
+_IMPLICIT_SKILL_PATTERNS: dict[str, list[str]] = {
+    # APIs & Backend
+    "rest_api": [
+        r"rest[\s_]?api|restful|http[\s_]endpoint",
+        r"built[\s_]?api|exposed[\s_]?as[\s_]?api",
+    ],
+    "fastapi": [r"fastapi|fast[\s_]api"],
+    "flask": [r"flask[\s_]app|using[\s_]flask|built[\s_]with[\s_]flask"],
+    "graphql": [r"\bgraphql\b"],
+    "microservices": [r"microservice|service[\s_]oriented[\s_]arch"],
+    # ML / Deep Learning
+    "deep_learning": [
+        r"neural[\s_]network|deep[\s_]learning|backprop",
+        r"train\w*[\s_]model|model[\s_]train",
+    ],
+    "fine_tuning": [
+        r"fine[\s_]?tun|transfer[\s_]learning",
+        r"\blora\b|\bqlora\b|\bpeft\b",
+    ],
+    "transformers": [
+        r"transformer|bert|gpt[\s_]model|attention[\s_]mech",
+    ],
+    "computer_vision_impl": [
+        r"cnn|convolutional|image[\s_]classif|object[\s_]detect",
+        r"yolov[5-9]|ultralytics",
+        r"mediapipe|keypoint[\s_]classif|point[\s_]history",
+    ],
+    "recommendation_systems": [
+        r"recommend\w*[\s_]system|collaborative[\s_]filter",
+    ],
+    "time_series": [
+        r"time[\s_]series|forecasting|lstm|arima",
+    ],
+    # NLP
+    "nlp_impl": [
+        r"text[\s_]classif|sentiment[\s_]anal|named[\s_]entity|nlp[\s_]pipeline",
+    ],
+    "chatbot": [r"chatbot|conversational[\s_]ai|dialog[\s_]system"],
+    "rag_impl": [r"rag|retrieval[\s_]augmented"],
+    "langchain_impl": [r"langchain|langgraph"],
+    "huggingface_impl": [r"hugging[\s_]face|huggingface[\s_]model"],
+    # Data Engineering
+    "data_pipeline": [
+        r"data[\s_]pipeline|etl|data[\s_]engineer",
+    ],
+    "streaming": [r"kafka|spark[\s_]stream|flink|rabbitmq"],
+    "workflow_orchestration_impl": [r"airflow|luigi|prefect|dbt\b"],
+    "web_scraping_impl": [r"web[\s_]scraping|beautifulsoup|selenium|scrapy"],
+    # Vector / Search
+    "vector_database_impl": [
+        r"vector[\s_]database|embedding[\s_]store|faiss|pinecone|qdrant|weaviate",
+    ],
+    "semantic_search": [r"similarity[\s_]search|semantic[\s_]search"],
+    # Cloud / DevOps
+    "aws_impl": [r"deploy\w*[\s_]on[\s_]aws|ec2|s3[\s_]bucket|lambda[\s_]function"],
+    "gcp_impl": [r"deploy\w*[\s_]on[\s_]gcp|google[\s_]cloud[\s_]run|bigquery"],
+    "azure_impl": [r"deploy\w*[\s_]on[\s_]azure|azure[\s_]func"],
+    "docker_impl": [r"docker[\s_]image|dockerfile|containeriz|dockerized"],
+    "kubernetes_impl": [r"kubernetes|k8s|helm[\s_]chart"],
+    "cicd": [r"ci[\s_]?/[\s_]?cd|github[\s_]actions|jenkins|gitlab[\s_]ci"],
+    "iac": [r"terraform|infra[\s_]as[\s_]code|ansible"],
+    # Databases
+    "sql_impl": [r"designed[\s_]schema|relational[\s_]db|sql[\s_]query"],
+    "mongodb_impl": [r"mongodb[\s_]atlas|nosql[\s_]database"],
+    "redis_impl": [r"redis[\s_]cache|caching[\s_]layer"],
+    # MLOps
+    "mlops_impl": [
+        r"mlflow|model[\s_]registry|experiment[\s_]tracking",
+        r"model[\s_]serv|model[\s_]deploy|serving[\s_]layer",
+        r"model[\s_]monitor|drift[\s_]detect|automated[\s_]retrain",
+    ],
+    # Architecture / Leadership
+    "system_design_impl": [
+        r"architected[\s_]the|designed[\s_]the[\s_]system|system[\s_]design",
+    ],
+    "leadership_impl": [r"led[\s_]team|managed[\s_]team|team[\s_]of[\s_]\d"],
+    "agile_impl": [r"agile[\s_]workflow|scrum[\s_]team|sprint[\s_]planning"],
+    # Security
+    "security_impl": [r"jwt|oauth|authentication[\s_]system|role[\s_]based[\s_]access"],
+}
+
+# ── Implicit skill confidence weights (audit wiring) ─────────────────────────
+# Each implicit skill category gets a heuristic confidence weight representing
+# how reliably the regex implies hands-on experience (vs keyword noise).
+# Only matches with weight >= _IMPLICIT_CONFIDENCE_THRESHOLD are returned.
+_IMPLICIT_SKILL_CONFIDENCE: dict[str, float] = {
+    # Backend frameworks: context-heavy patterns → high confidence
+    "fastapi": 0.75,
+    "flask": 0.75,
+    "graphql": 0.70,
+    "rest_api": 0.65,
+    "microservices": 0.60,
+    # ML implementation signals
+    "deep_learning": 0.70,
+    "fine_tuning": 0.75,
+    "transformers": 0.65,
+    "computer_vision_impl": 0.70,
+    "nlp_impl": 0.65,
+    "rag_impl": 0.75,
+    "langchain_impl": 0.70,
+    "huggingface_impl": 0.65,
+    # Data engineering / infra
+    "data_pipeline": 0.60,
+    "streaming": 0.65,
+    "workflow_orchestration_impl": 0.65,
+    "web_scraping_impl": 0.60,
+    # Vector/search
+    "vector_database_impl": 0.70,
+    "semantic_search": 0.65,
+    # DevOps/cloud
+    "docker_impl": 0.70,
+    "kubernetes_impl": 0.70,
+    "cicd": 0.65,
+    "iac": 0.65,
+    "aws_impl": 0.65,
+    "gcp_impl": 0.65,
+    "azure_impl": 0.65,
+    # Databases
+    "sql_impl": 0.60,
+    "mongodb_impl": 0.60,
+    "redis_impl": 0.60,
+    # MLOps + architecture
+    "mlops_impl": 0.70,
+    "system_design_impl": 0.60,
+    "leadership_impl": 0.60,
+    "agile_impl": 0.60,
+    "security_impl": 0.60,
+    # Other categories default via .get(..., 0.60)
+}
+
+_IMPLICIT_CONFIDENCE_THRESHOLD = 0.60
+
+# ── Project complexity dimensions (Gold Standard PROJECT_WEIGHT_KEYWORDS) ──────
+# Weighted regex dimensions for deterministic project quality scoring.
+# Weights sum to 1.0. Each dimension fires if ANY pattern matches.
+_PROJECT_COMPLEXITY_DIMENSIONS: dict[str, dict] = {
+    "scale": {
+        "weight": 0.30,
+        "patterns": [
+            r"\d+\s*[km]\+?\s*user",
+            r"million[\s_]user",
+            r"high[\s_]traffic",
+            r"large[\s_]scale|large-scale",
+            r"\d+\s*tb\b",
+            r"\d+k\+?\s*request",
+            r"production[\s_]system",
+            r"enterprise[\s_]level",
+        ],
+    },
+    "complexity": {
+        "weight": 0.25,
+        "patterns": [
+            r"distributed[\s_]system",
+            r"real[\s-]?time",
+            r"custom[\s_]algorithm",
+            r"from[\s_]scratch",
+            r"optimiz\w+[\s_](?:algorithm|query|model)",
+            r"novel[\s_]approach",
+            r"research[\s_]paper",
+            r"multi[\s-]?modal",
+            r"end[\s-]to[\s-]end",
+            r"semantic[\s_](?:cv|analysis|search|matching)",
+            r"multi[\s-]?agent|multi[\s-]?step",
+        ],
+    },
+    "impact": {
+        "weight": 0.25,
+        "patterns": [
+            r"\d+\s*%\s*(?:improv|reduc|increas|accur|faster|speedup)",
+            r"(?:open[\s_]?source|github)[\s\w]*\d+[\s_]star",
+            r"\baward\b",
+            r"\bpublish\w*\b",
+            r"used[\s_](?:in|by)[\s_]production",
+            r"revenue[\s_]impact",
+            r"cost[\s_]saving",
+            r"automated[\s_](?:technical|behavioral|assessment|ranking)",
+        ],
+    },
+    "ownership": {
+        "weight": 0.20,
+        "patterns": [
+            r"(?:sole|solo|independently)[\s_]developed",
+            r"architected[\s_](?:and|the)",
+            r"built[\s_](?:and[\s_]deployed|from[\s_]scratch)",
+            r"designed[\s_]and[\s_](?:developed|implemented)",
+            r"led[\s_](?:development|team|the)",
+            r"(?:built|developed|implemented)[\s_](?:a[\s_])?(?:deep|cnn|yolo|mediapipe|intelligent)",
+        ],
+    },
+}
+
+# ── Text normalization constants ───────────────────────────────────────────────
+_NOISE_PATTERN = re.compile(r"[^\w\s,./+#@-]")
+_MULTI_SPACE   = re.compile(r"\s+")
+
+# ── Date range extraction for experience fallback ──────────────────────────────
+_DATE_RANGE_PATTERN = re.compile(
+    r"((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?"
+    r"(\d{4})\s*[-–—]\s*"
+    r"((?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?"
+    r"(\d{4}|present|current|now|till\s*date|ongoing)",
+    re.IGNORECASE,
+)
+_MONTHS_MAP: dict[str, int] = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    "january": 1, "february": 2, "march": 3, "april": 4, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10,
+    "november": 11, "december": 12,
+}
+# ── Experience line exclusion patterns (Gold Standard 3-pattern approach) ──────
+# Split into three groups to avoid false-positives on lines like:
+#   "Senior ML Engineer at University Hospital 2022 – 2024"  ← KEEP (work experience)
+#   "Internship at XYZ 2023 – 2024"                          ← SKIP (not full-time)
+#   "Bachelor of Science, Cairo University 2018 – 2022"      ← SKIP (education)
+
+# 1. Strong signal of non-permanent work → always skip
+_WORK_INTERNSHIP_KW = re.compile(
+    r"\b(intern|internship|trainee|training|volunteer|part[\s-]?time|freelance"
+    r"|apprentice|attachment|practicum|summer\s+program)\b",
+    re.IGNORECASE,
+)
+# 2. Education lines → skip UNLESS a job-title indicator is also present
+_EDUCATION_LINE_KW = re.compile(
+    r"\b(bachelor|master|phd|university|college|institute|school"
+    r"|expected[\s_]graduation|graduation|coursework|degree)\b",
+    re.IGNORECASE,
+)
+# 3. Job-title indicators — if present on an education line, it's actually work experience
+_JOB_TITLE_INDICATOR = re.compile(
+    r"\b(engineer|developer|scientist|analyst|manager|lead|director"
+    r"|consultant|architect|researcher|specialist|officer|head|senior|junior)\b",
+    re.IGNORECASE,
+)
+
+# ── Skill alias map (alias → canonical) for normalization ─────────────────────
+# Derived from Gold Standard SKILL_ALIASES (193+ entries condensed to key groups)
+_SKILL_ALIASES: dict[str, str] = {
+    # Python ecosystem
+    "python3": "python", "py": "python", "pythonic": "python",
+    # JavaScript
+    "js": "javascript",
+    # TypeScript is a DISTINCT skill from JavaScript — DO NOT collapse.
+    # A JD requiring TypeScript should not be satisfied by a plain JS CV.
+    "ts": "typescript",        # "ts" → typescript (not javascript)
+    # "typescript": "javascript"  ← REMOVED (audit fix #2)
+    "node.js": "nodejs",
+    # "node": "nodejs" ← REMOVED: too broad, matches "node" in "decision node",
+    #   "knowledge graph node", etc. Use only "node.js" (specific enough).
+    # React / Vue / Angular — distinct first-class canonicals
+    "reactjs": "react", "react.js": "react",
+    "vuejs": "vue",    "vue.js": "vue",
+    "angularjs": "angular",
+    # ML Frameworks
+    "tf": "tensorflow", "tf2": "tensorflow", "keras": "tensorflow",
+    "torch": "pytorch",
+    # Scikit-learn
+    "sklearn": "scikit-learn", "scikit": "scikit-learn",
+    "scikit learn": "scikit-learn",
+    # Cloud
+    "amazon web services": "aws", "ec2": "aws", "s3": "aws",
+    "google cloud": "gcp", "google cloud platform": "gcp", "bigquery": "gcp",
+    "microsoft azure": "azure", "ms azure": "azure",
+    # Computer Vision / YOLO
+    # NOTE: "cv" alias INTENTIONALLY OMITTED — causes false-positive CV (curriculum vitae) matches
+    "cv2": "opencv",
+    "computervision": "computer vision", "image processing": "computer vision",
+    "yolov5": "yolo", "yolov7": "yolo", "yolov8": "yolo", "yolov9": "yolo",
+    "ultralytics": "yolo",
+    "cnn": "convolutional neural networks",
+    "cnns": "convolutional neural networks",
+    "convolutional neural network": "convolutional neural networks",
+    "object detection": "object detection",
+    "image classification": "image classification",
+    # NLP / LLM
+    "natural language processing": "nlp",
+    "llm": "large language models", "llms": "large language models",
+    "large language model": "large language models",
+    "huggingface": "huggingface",
+    "hugging face": "huggingface",
+    "transformers": "transformers", "transformer": "transformers",
+    "retrieval augmented generation": "rag",
+    "gpt": "gpt", "llama": "llama", "gemini": "gemini",
+    # Databases
+    "mysql": "sql", "postgresql": "sql", "postgres": "sql", "sqlite": "sql",
+    "mongo": "mongodb", "mongodb atlas": "mongodb",
+    # DevOps
+    "k8s": "kubernetes",
+    "ci/cd": "ci/cd", "cicd": "ci/cd",
+    "docker": "docker",
+    # Data Engineering — now in alias map (were only in _SKILL_SYNONYMS before)
+    "apache spark": "spark", "pyspark": "spark",
+    "apache kafka": "kafka",
+    "apache airflow": "airflow",
+    "dbt core": "dbt",
+    # General
+    "rest api": "rest api", "restful api": "rest api", "restful": "rest api",
+    "api": "api",
+    "github": "git", "gitlab": "git", "bitbucket": "git",
+    "version control": "git",
+    "dl": "deep learning",
+    "ml": "machine learning",
+    "oop": "object oriented programming",
+    "object-oriented programming": "object oriented programming",
+    # Data tools — own canonical
+    "pandas": "pandas", "numpy": "numpy",
+    "matplotlib": "matplotlib", "seaborn": "seaborn", "jupyter": "jupyter",
+    "faiss": "faiss", "pinecone": "pinecone", "weaviate": "weaviate",
+    "vector database": "vector databases", "vector databases": "vector databases",
+    "fastapi": "fastapi", "fast api": "fastapi",
+    "streamlit": "streamlit", "mlflow": "mlflow",
+    # Data Science semantic synonyms
+    "data analytics": "data analysis",
+    "statistical analysis": "data science",
+    "data preprocessing": "data science",
+    "exploratory data analysis": "data science",
+    "eda": "data science",
+    "feature engineering": "data science",
+    "model training": "data science",
+    # Agile / workflow
+    "agile workflow": "agile", "scrum team": "agile", "scrum": "scrum",
+    "sprint planning": "agile",
+}
+
+# ── Short-alias guard (audit fix #2) ──────────────────────────────────────────
+# Single-character or ambiguous aliases must NEVER be matched via free-text
+# word-boundary regex (\b) because they cause false positives:
+#   "r" matches the letter r in countless words after lowercase normalization.
+#   "c" similarly.
+#   "go" matches "go" in "going", "algorithm", "cargo" etc.
+# These skills are only matched when they appear as an explicit, standalone
+# token surrounded by whitespace/punctuation — NOT inside another word.
+_SHORT_SKILL_EXACT_ONLY: frozenset[str] = frozenset({"r", "c", "go", "c#", "c++"})
+
+
+def _skill_in_text_safe(skill: str, lower_text: str) -> bool:
+    """
+    Safe skill presence check that handles short ambiguous aliases.
+    For skills in _SHORT_SKILL_EXACT_ONLY: require surrounding non-alpha chars.
+    For all other skills: standard word-boundary regex.
+    """
+    if skill in _SHORT_SKILL_EXACT_ONLY:
+        # Match only when the skill is a standalone token (not inside a word)
+        import re as _re
+        return bool(_re.search(
+            r"(?<![a-z0-9])" + _re.escape(skill) + r"(?![a-z0-9])",
+            lower_text,
+        ))
+    return bool(re.search(r"\b" + re.escape(skill) + r"\b", lower_text))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # State
@@ -379,27 +895,32 @@ def semantic_skill_check(
 ) -> tuple[bool, str]:
     """
     Returns (matched, match_type) — 'exact' | 'semantic' | 'text' | ''.
-    Rescues candidates who have the skill under a different name.
+    Normalizes via _SKILL_ALIASES before matching (Gold Standard approach) so
+    aliases like 'ml' match 'machine learning', 'yolov8' matches 'yolo', etc.
     """
-    req_lower = required_skill.lower().strip()
-    cand_lower = [s.lower() for s in candidate_skills]
+    req_canonical = normalize_skill(required_skill)
+    req_lower     = req_canonical
 
-    # 1. Exact name in skills list
-    if any(req_lower in s for s in cand_lower):
+    # Normalize candidate skills to canonical forms too
+    cand_canonical = [normalize_skill(s) for s in candidate_skills]
+    cand_lower     = [s.lower() for s in candidate_skills]
+
+    # 1. Exact canonical match
+    if any(req_lower in s for s in cand_canonical) or any(req_lower in s for s in cand_lower):
         return True, "exact"
 
-    text_lower = raw_text.lower()
+    text_lower = _normalize_text(raw_text)
 
     # 2. Synonym expansion through canonical groups
     for canonical, synonyms in _SKILL_SYNONYMS.items():
-        if req_lower == canonical or req_lower in synonyms:
+        if req_lower == canonical or req_lower in synonyms or required_skill.lower() in synonyms:
             for term in [canonical] + synonyms:
-                if any(term in s for s in cand_lower):
+                if any(term in s for s in cand_canonical) or any(term in s for s in cand_lower):
                     return True, "semantic"
                 if term in text_lower:
                     return True, "text"
 
-    # 3. Direct substring in raw CV text
+    # 3. Direct substring in normalized CV text
     if req_lower in text_lower:
         return True, "text"
 
@@ -563,7 +1084,9 @@ def _term_in_text(term: str, text: str) -> bool:
     term = term.lower()
     if " " in term or "-" in term or "." in term or "_" in term:
         return term in text
-    return bool(re.search(r"\b" + re.escape(term) + r"\b", text))
+    # Delegate to the short-alias–aware helper so single-char skills like
+    # "r", "c", "go" don't generate false positives inside longer words.
+    return _skill_in_text_safe(term, text)
 
 
 def _skill_matched(canonical: str, cv_lower: str) -> bool:
@@ -815,6 +1338,255 @@ def _build_raw_text(candidate: dict) -> str:
     return " ".join(p for p in parts if p)
 
 
+def _normalize_text(text: str) -> str:
+    """Lowercase → remove noise punctuation → collapse whitespace (Gold Standard)."""
+    text = text.lower()
+    text = _NOISE_PATTERN.sub(" ", text)
+    text = _MULTI_SPACE.sub(" ", text).strip()
+    return text
+
+
+def normalize_skill(skill: str) -> str:
+    """
+    Map any skill alias to its canonical form using _SKILL_ALIASES.
+    Falls back to lowercase-stripped input if no alias is found.
+    """
+    key = skill.lower().strip()
+    return _SKILL_ALIASES.get(key, key)
+
+
+def _extract_implicit_skills(exp_text: str, proj_text: str) -> list[tuple[str, str]]:
+    """
+    Scan raw experience + project text for skills demonstrated in context
+    but not explicitly listed in the CV skills section.
+
+    Uses 36 regex patterns across 10 categories (Gold Standard PROJECT_SKILL_PATTERNS).
+    Returns [(canonical_skill, evidence_snippet)] — one match per category.
+    """
+    combined = _normalize_text(f"{exp_text} {proj_text}")
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    for canonical, patterns in _IMPLICIT_SKILL_PATTERNS.items():
+        confidence = _IMPLICIT_SKILL_CONFIDENCE.get(canonical, 0.60)
+        if confidence < _IMPLICIT_CONFIDENCE_THRESHOLD:
+            continue
+
+        for pat in patterns:
+            m = re.search(pat, combined)
+            if not m or canonical in seen:
+                continue
+
+            start = max(0, m.start() - 35)
+            end = min(len(combined), m.end() + 50)
+            snippet = combined[start:end].replace("\n", " ").strip()
+            found.append((canonical, f"(confidence={confidence:.2f}) …{snippet}…"))
+            seen.add(canonical)
+            break
+
+    return found
+
+
+def _score_project_complexity(project_texts: list[str]) -> tuple[float, list[str]]:
+    """
+    Weighted regex project quality scoring across 4 dimensions
+    (scale 30%, complexity 25%, impact 25%, ownership 20%).
+    Derived from Gold Standard PROJECT_WEIGHT_KEYWORDS.
+
+    Returns (total_score 0.0–1.0, dimension_labels_with_contribution).
+    """
+    combined = _normalize_text(" ".join(project_texts))
+    dimensions_hit: list[str] = []
+    total = 0.0
+    for dim, cfg in _PROJECT_COMPLEXITY_DIMENSIONS.items():
+        if any(re.search(pat, combined) for pat in cfg["patterns"]):
+            weight = cfg["weight"]
+            total += weight
+            dimensions_hit.append(f"{dim}(+{weight*100:.0f}%)")
+    return round(min(total, 1.0), 3), dimensions_hit
+
+
+def _is_education_line(line: str) -> bool:
+    """
+    Return True if this line should be excluded from experience counting.
+    Gold Standard 3-pattern approach:
+      - Internship/volunteer/freelance keywords → always exclude.
+      - Education keywords → exclude UNLESS a job-title indicator is also present.
+        (prevents skipping "Senior ML Engineer at University Hospital 2022 – 2024")
+    """
+    if _WORK_INTERNSHIP_KW.search(line):
+        return True
+    if _EDUCATION_LINE_KW.search(line) and not _JOB_TITLE_INDICATOR.search(line):
+        return True
+    return False
+
+
+def _extract_experience_from_text(raw_text: str) -> int:
+    """
+    Fallback: extract years of full-time work experience from date ranges in CV text.
+    Skips internship, education, and volunteer lines using the Gold Standard
+    3-pattern approach (_is_education_line).
+    Returns 0 if no valid ranges are found (never negative).
+    """
+    today = date.today()
+    total_months = 0
+    for line in raw_text.splitlines():
+        if _is_education_line(line):
+            continue
+        for m in _DATE_RANGE_PATTERN.finditer(line):
+            start_mo_str = (m.group(1) or "").lower().strip().rstrip(".")[:3]
+            start_yr_str = m.group(2)
+            end_mo_str   = (m.group(3) or "").lower().strip().rstrip(".")[:3]
+            end_yr_str   = m.group(4)
+            try:
+                start_yr = int(start_yr_str)
+                start_mo = _MONTHS_MAP.get(start_mo_str, 1)
+                end_str  = end_yr_str.lower().strip()
+                if end_str in ("present", "current", "now", "ongoing", "till date"):
+                    end_yr, end_mo = today.year, today.month
+                else:
+                    end_yr = int(end_str)
+                    end_mo = _MONTHS_MAP.get(end_mo_str, 12)
+                if start_yr < 1990 or end_yr > today.year + 1:
+                    continue
+                if end_yr < start_yr or (end_yr == start_yr and end_mo < start_mo):
+                    continue
+                duration = (end_yr - start_yr) * 12 + (end_mo - start_mo)
+                if 1 <= duration <= 600:
+                    total_months += duration
+            except (ValueError, AttributeError):
+                continue
+    return max(0, round(total_months / 12))
+
+
+def normalize_skills(skills: list[str]) -> list[str]:
+    """
+    Normalize a list of skills and deduplicate while preserving order.
+    Gold Standard normalize_skills() — applies normalize_skill() to each entry.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for s in skills:
+        normalized = normalize_skill(s)
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def compute_skill_overlap(cv_skills: list[str], jd_required: list[str]) -> float:
+    """
+    Fraction of JD required skills that appear in the CV (explicit + implicit merged).
+    Both lists must already be normalized. Returns 0.0 if jd_required is empty.
+    Gold Standard compute_skill_overlap().
+    """
+    if not jd_required:
+        return 0.0
+    cv_set = set(cv_skills)
+    matched = sum(1 for s in jd_required if s in cv_set)
+    return matched / len(jd_required)
+
+
+def assign_label(
+    overlap: float,
+    cv_years: int,
+    jd_years: int,
+    project_score: float = 0.0,
+) -> str:
+    """
+    Map skill overlap + experience + project complexity → fit label.
+    Gold Standard assign_label() with project_score boost (v4 — fixed).
+
+    project_score (0.0–1.0) gives a max +10% boost to effective overlap:
+      • 72% skills + 0.8 project → 80% effective → good_fit
+      • 30% skills + 0.9 project → 39% effective → no_fit  (boost insufficient)
+      • 85% skills + under-exp (exp_ratio < 0.5) → partial_fit  (experience gate)
+
+    Returns: "good_fit" | "partial_fit" | "no_fit"
+    """
+    exp_ratio     = min(cv_years / jd_years, 3.0) if jd_years > 0 else 1.0
+    project_boost = project_score * 0.10
+    boosted       = min(overlap + project_boost, 1.0)
+
+    if boosted >= FIT_THRESHOLD:
+        if exp_ratio < 0.5:
+            return "partial_fit"   # strong skills but significantly under-experienced
+        return "good_fit"
+    elif boosted >= PARTIAL_THRESHOLD:
+        return "partial_fit"
+    return "no_fit"
+
+
+def aggregate_project_score(project_texts: list[str]) -> float:
+    """
+    Average project complexity score across all projects.
+    Gold Standard aggregate_project_score() — scores each project independently
+    then averages (not concatenating, which would over-count shared keywords).
+    Returns 0.0 if no projects.
+    """
+    if not project_texts:
+        return 0.0
+    scores = [_score_project_complexity([p])[0] for p in project_texts]
+    return round(sum(scores) / len(scores), 3)
+
+
+def _compute_feature_attribution(cand: dict) -> list[dict]:
+    """
+    Shapley-style feature attribution for the candidate's final score.
+
+    For a linear weighted-sum model, the Shapley value of each feature is
+    weight × score — exactly how SHAP decomposes linear models.
+    Produces the same information SHAP would produce without GPU/neural overhead.
+
+    Returns list of dicts sorted descending by contribution_pts (SHAP magnitude).
+    """
+    cs      = cand.get("component_scores", {})
+    det     = cand.get("det_scores", {})
+    weights = cand.get("weight_breakdown", {})
+    genai   = cand.get("genai_data", {})
+
+    weighted_features = {
+        "technical_match":    cs.get("technical_match",    det.get("technical_match",    0.0)),
+        "project_depth":      cs.get("project_depth",                                    0.0),
+        "education_fit":      cs.get("education_fit",      det.get("education_fit",      0.0)),
+        "experience_quality": cs.get("experience_quality", det.get("experience_quality", 0.0)),
+        "soft_skills":        cs.get("soft_skills",        det.get("soft_skills",        0.0)),
+        "training_score":     cs.get("training_score",     det.get("training_score",     0.0)),
+        "nice_to_have":       cs.get("nice_to_have",       det.get("nice_to_have",       0.0)),
+    }
+
+    attributions = []
+    for feat, score in weighted_features.items():
+        w = weights.get(feat, 0.0)
+        contribution = round(w * score, 2)
+        attributions.append({
+            "feature":          feat,
+            "score":            round(score, 1),
+            "weight_pct":       int(w * 100),
+            "contribution_pts": contribution,
+            "direction":        "positive" if contribution > 5 else ("neutral" if contribution > 0 else "weak"),
+        })
+
+    # Additive bonuses (not weighted — direct contributions)
+    attributions.append({
+        "feature":          "genai_bonus",
+        "score":            round(genai.get("bonus", 0.0), 1),
+        "weight_pct":       0,
+        "contribution_pts": round(genai.get("bonus", 0.0), 2),
+        "direction":        "positive" if genai.get("bonus", 0) > 0 else "neutral",
+    })
+    attributions.append({
+        "feature":          "project_complexity_boost",
+        "score":            round(cand.get("project_complexity_score", 0.0) * 100, 1),
+        "weight_pct":       0,
+        "contribution_pts": round(cand.get("complexity_boost_applied", 0.0), 2),
+        "direction":        "positive" if cand.get("complexity_boost_applied", 0) > 0 else "neutral",
+    })
+
+    attributions.sort(key=lambda x: x["contribution_pts"], reverse=True)
+    return attributions
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Node 1 — Context Gatherer
 # ─────────────────────────────────────────────────────────────────────────────
@@ -984,28 +1756,97 @@ def context_gatherer_node(state: RankingState) -> RankingState:
 
 def deterministic_scoring_node(state: RankingState) -> RankingState:
     """
-    Rule-based scoring for each candidate using the v6.0 algorithm.
+    Rule-based scoring for each candidate using the v7.0 algorithm.
 
     Scores produced (0–100 each):
-      • technical_match   — rich synonym-map coverage + evidence levels + stuffing penalty
-      • experience_quality— fulltime years OR internship months (student mode)
-      • education_fit     — degree hierarchy floor + field overlap + AI-field fallback
-      • soft_skills       — 5 dimensions via keyword evidence + internship implicit boost
-      • training_score    — internship months + training entries + freelance credit
-      • nice_to_have      — bonus signals (opencv, yolo, langchain, competitions, OSS)
+      • technical_match    — alias-normalized synonym-map + evidence levels + stuffing penalty
+      • experience_quality — fulltime years OR internship months (student mode)
+                            + date-range fallback if DB years_of_experience is 0
+      • education_fit      — degree hierarchy floor + field overlap + AI-field fallback
+      • soft_skills        — 5 dimensions via keyword evidence + internship implicit boost
+      • training_score     — internship months + training entries + freelance credit
+      • nice_to_have       — bonus signals (opencv, yolo, langchain, competitions, OSS)
+      • project_complexity — weighted regex (scale 30% / complexity 25% / impact 25% / ownership 20%)
     """
     jd = state["jd_data"]
     required_years: int = jd.get("required_years") or 0
     required_skills: list[dict] = jd.get("required_skills", [])
 
+    candidates_pool: list[dict] = list(state["candidates_data"] or [])
+
+    # ── Phase 2 (retrieval): Qdrant-driven Top-K candidate narrowing ─────────
+    # If embeddings + qdrant are available, encode JD + CVs, upsert vectors tagged
+    # by jd_id (requisition_id), and retrieve top TOP_K before heavy scoring.
+    # This simulates production retrieval and reduces cost for CE/SHAP later.
+    if _EMBEDDING_SERVICE_AVAILABLE and _QDRANT_AVAILABLE and candidates_pool:
+        try:
+            jd_text = (
+                jd.get("full_description")
+                or jd.get("key_responsibilities")
+                or jd.get("job_title")
+                or ""
+            )
+            jd_vec = _encode_jd(jd_text)
+            cv_texts = [c.get("raw_text") or "" for c in candidates_pool]
+            cv_vecs = _encode_cvs_batch(cv_texts)
+
+            # Sanity floor log (0.55) — helps catch missing query/passsage prefixes.
+            _validate_embedding_quality(jd_vec, cv_vecs, threshold=0.55)
+
+            # Keep qdrant collection clean per requisition_id to avoid stale points
+            _qdrant_delete_jd_vectors(jd_id=state["requisition_id"])
+
+            points = []
+            for cand, vec in zip(candidates_pool, cv_vecs):
+                if not vec:
+                    continue
+                points.append({
+                    "cv_id": int(cand.get("application_id") or 0),
+                    "jd_id": int(state["requisition_id"]),
+                    "vector": vec,
+                    "payload": {
+                        "candidate_name": cand.get("candidate_name"),
+                        "email": cand.get("email"),
+                    },
+                })
+
+            if points:
+                _qdrant_upsert_cvs_batch(points)
+                hits = _qdrant_search_for_jd(
+                    jd_vector=jd_vec,
+                    jd_id=int(state["requisition_id"]),
+                    top_k=TOP_K,
+                )
+
+                # Map retrieved IDs → similarity score; filter pool to Top-K
+                score_by_id = {int(h["cv_id"]): float(h.get("score", 0.0)) for h in hits}
+                if score_by_id:
+                    narrowed = [
+                        {**c, "retrieval_score": round(score_by_id.get(int(c.get("application_id") or 0), 0.0), 4)}
+                        for c in candidates_pool
+                        if int(c.get("application_id") or 0) in score_by_id
+                    ]
+                    narrowed.sort(key=lambda c: c.get("retrieval_score", 0.0), reverse=True)
+                    candidates_pool = narrowed
+                    logger.info(
+                        "[deterministic_scoring] Retrieval applied — pool narrowed to %d (TOP_K=%d).",
+                        len(candidates_pool), TOP_K,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[deterministic_scoring] Retrieval step failed (%s) — scoring full pool.",
+                exc,
+            )
+
     scored: list[dict] = []
 
-    for cand in state["candidates_data"]:
+    for cand in candidates_pool:
         try:
             raw_text: str = cand.get("raw_text", "")
-            cv_lower = raw_text.lower()
+            # Normalize text before all keyword scanning (Gold Standard)
+            cv_lower = _normalize_text(raw_text)
             skill_names: list[str] = [s["name"] for s in cand.get("skills", [])]
-            projects   = cand.get("projects", [])
+            projects    = cand.get("projects", [])
             experiences = cand.get("experiences", [])
             fixes_applied: list[str] = []
 
@@ -1013,6 +1854,18 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
             exp_breakdown = _calc_experience_breakdown(experiences)
             fulltime_years    = exp_breakdown["fulltime_years"]
             internship_months = exp_breakdown["internship_months"]
+
+            # ── Date-range fallback (Gold Standard) ───────────────────────────
+            # If structured DB experience is 0 but the raw text has date ranges,
+            # extract years directly from the CV text as a fallback signal.
+            db_years = cand.get("years_of_experience") or 0
+            if db_years == 0 and fulltime_years == 0:
+                text_extracted_years = _extract_experience_from_text(raw_text)
+                if text_extracted_years > 0:
+                    fulltime_years = text_extracted_years
+                    fixes_applied.append(
+                        f"[FALLBACK] Experience extracted from CV date ranges: {text_extracted_years}yr"
+                    )
 
             # ── [FIX-A] AI/ML background detection ───────────────────────────
             ai_background = any(kw in cv_lower for kw in _AI_KEYWORDS)
@@ -1047,7 +1900,7 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
             # ── Education fit [FIX-C + FIX-A field fallback] ─────────────────
             edu_score = _calc_education_fit(cand, jd, cv_lower)
 
-            # ── Technical match — rich synonym map + evidence levels ──────────
+            # ── Technical match — alias-normalized synonym map + evidence levels
             raw_tech_score, matched_skills = _calc_keyword_coverage(
                 required_skills, cv_lower, projects
             )
@@ -1077,17 +1930,38 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
             # ── Nice-to-have bonus ────────────────────────────────────────────
             nice_score = _score_nice_to_have(cv_lower)
 
+            # ── Implicit skill inference (XAI evidence snippets) ──────────────
+            exp_text = " ".join(
+                f"{e.get('job_title', '')} {e.get('description', '')}"
+                for e in experiences
+            )
+            proj_text_combined = " ".join(
+                f"{p.get('project_name', '')} {p.get('description', '')} {p.get('tech_stack', '')}"
+                for p in projects
+            )
+            implicit_skills = _extract_implicit_skills(exp_text, proj_text_combined)
+
+            # ── Project complexity scoring (scale / complexity / impact / ownership) ──
+            project_texts = [
+                f"{p.get('project_name', '')} {p.get('description', '')} {p.get('tech_stack', '')}"
+                for p in projects
+            ]
+            project_complexity_score, complexity_dimensions = _score_project_complexity(project_texts)
+
             total_experience_months = int(fulltime_years * 12) + internship_months
 
             scored.append({
                 **cand,
-                "total_experience_months": total_experience_months,
-                "fulltime_years":          fulltime_years,
-                "internship_months":       internship_months,
-                "ai_background_detected":  ai_background,
-                "matched_skills":          matched_skills,
-                "stuffing_penalty":        stuffing_penalty,
-                "applied_fixes":           fixes_applied,
+                "total_experience_months":  total_experience_months,
+                "fulltime_years":           fulltime_years,
+                "internship_months":        internship_months,
+                "ai_background_detected":   ai_background,
+                "matched_skills":           matched_skills,
+                "stuffing_penalty":         stuffing_penalty,
+                "applied_fixes":            fixes_applied,
+                "implicit_skills":          implicit_skills,
+                "project_complexity_score": project_complexity_score,
+                "complexity_dimensions":    complexity_dimensions,
                 "det_scores": {
                     "technical_match":    round(technical_match, 1),
                     "experience_quality": round(exp_score, 1),
@@ -1095,6 +1969,7 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
                     "soft_skills":        round(soft_score, 1),
                     "training_score":     round(training_score, 1),
                     "nice_to_have":       round(nice_score, 1),
+                    "project_complexity": round(project_complexity_score * 100, 1),
                 },
             })
 
@@ -1105,13 +1980,16 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
             )
             scored.append({
                 **cand,
-                "total_experience_months": 0,
-                "fulltime_years":          0.0,
-                "internship_months":       0,
-                "ai_background_detected":  False,
-                "matched_skills":          [],
-                "stuffing_penalty":        0.0,
-                "applied_fixes":           ["[ERROR] Deterministic scoring failed — zeros applied"],
+                "total_experience_months":  0,
+                "fulltime_years":           0.0,
+                "internship_months":        0,
+                "ai_background_detected":   False,
+                "matched_skills":           [],
+                "stuffing_penalty":         0.0,
+                "applied_fixes":            ["[ERROR] Deterministic scoring failed — zeros applied"],
+                "implicit_skills":          [],
+                "project_complexity_score": 0.0,
+                "complexity_dimensions":    [],
                 "det_scores": {
                     "technical_match":    0.0,
                     "experience_quality": 0.0,
@@ -1119,6 +1997,7 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
                     "soft_skills":        0.0,
                     "training_score":     0.0,
                     "nice_to_have":       0.0,
+                    "project_complexity": 0.0,
                 },
             })
 
@@ -1487,16 +2366,41 @@ def final_ranker_node(state: RankingState) -> RankingState:
             )
 
             genai_bonus = genai.get("bonus", 0.0)
-            final_score = round(min(100.0, weighted_sum + genai_bonus), 2)
+            # Project complexity boost: max +10 pts (score 1.0 → +10, 0.5 → +5…)
+            complexity_boost = round(cand.get("project_complexity_score", 0.0) * 10.0, 2)
+            final_score = round(min(100.0, weighted_sum + genai_bonus + complexity_boost), 2)
+
+            # ── Experience ratio floor (Gold Standard) ────────────────────────
+            # A candidate with strong skills but fewer than 50% of required years
+            # is capped at "Maybe" regardless of score — prevents over-promotion.
+            fulltime_yrs = cand.get("fulltime_years", 0.0)
+            exp_ratio = min(fulltime_yrs / required_years, 3.0) if required_years > 0 else 1.0
+            exp_floor_applied = False
+            if required_years > 0 and exp_ratio < 0.5 and final_score >= 55:
+                final_score = min(final_score, 54.9)  # cap below "Hire" threshold
+                exp_floor_applied = True
+
+            # ── Shapley-style feature attribution (pre-compute for reporting) ──
+            intermediate_cand = {
+                **cand,
+                "component_scores":         component_scores,
+                "weight_breakdown":         weights,
+                "complexity_boost_applied": complexity_boost,
+            }
+            feature_attribution = _compute_feature_attribution(intermediate_cand)
 
             scored.append({
                 **cand,
-                "final_score": final_score,
-                "weighted_sum": round(weighted_sum, 2),
-                "genai_bonus_applied": genai_bonus,
-                "scoring_mode": mode,
-                "weight_breakdown": weights,
-                "component_scores": component_scores,
+                "final_score":              round(final_score, 2),
+                "weighted_sum":             round(weighted_sum, 2),
+                "genai_bonus_applied":      genai_bonus,
+                "complexity_boost_applied": complexity_boost,
+                "exp_ratio":                round(exp_ratio, 3),
+                "exp_floor_applied":        exp_floor_applied,
+                "scoring_mode":             mode,
+                "weight_breakdown":         weights,
+                "component_scores":         component_scores,
+                "feature_attribution":      feature_attribution,
                 # Temporary absolute tier — overwritten with pool-relative label below
                 "recommendation": _absolute_tier(final_score),
             })
@@ -1508,33 +2412,115 @@ def final_ranker_node(state: RankingState) -> RankingState:
             )
             scored.append({
                 **cand,
-                "final_score": 0.0,
-                "weighted_sum": 0.0,
-                "genai_bonus_applied": 0.0,
-                "scoring_mode": mode,
-                "weight_breakdown": weights,
-                "component_scores": {},
-                "recommendation": "Error — Manual Review Required",
+                "final_score":              0.0,
+                "weighted_sum":             0.0,
+                "genai_bonus_applied":      0.0,
+                "complexity_boost_applied": 0.0,
+                "exp_ratio":                0.0,
+                "exp_floor_applied":        False,
+                "scoring_mode":             mode,
+                "weight_breakdown":         weights,
+                "component_scores":         {},
+                "feature_attribution":      [],
+                "recommendation":           "Error — Manual Review Required",
             })
 
-    # ── Phase 2: sort pool → assign rank + pool-relative label ───────────────
+    # ── Phase 2: optional CE reranking + hybrid score ────────────────────────
+    # If embedding_service is available, run the cross-encoder over all
+    # candidates and blend 70% CE probability with 30% skill_overlap.
+    # This prevents semantic drift (fluent writing without skills) from
+    # outranking skill-rich but terse CVs.
+    # Falls back to deterministic final_score if CE model unavailable.
+    if _EMBEDDING_SERVICE_AVAILABLE and scored:
+        jd_full_text = (
+            jd.get("full_description")
+            or jd.get("key_responsibilities")
+            or jd.get("job_title")
+            or ""
+        )
+        cv_texts  = [c.get("raw_text") or "" for c in scored]
+        try:
+            ce_logits = _ce_rerank(jd_full_text, cv_texts)
+            for cand, logit in zip(scored, ce_logits):
+                overlap = cand.get("skill_overlap", 0.0)
+                # skill_overlap may not be in state yet — derive from tech score
+                if overlap == 0.0:
+                    tech = cand.get("det_scores", {}).get("technical_match", 0.0)
+                    overlap = round(tech / 100.0, 4)
+                hs = _hybrid_score(logit, overlap)
+                # Blend: keep final_score as base, re-weight with hybrid signal
+                # (0.5 deterministic + 0.5 hybrid keeps rule-based domain knowledge)
+                blended = round(0.50 * cand["final_score"] + 0.50 * hs * 100.0, 2)
+                cand["ce_logit"]     = round(logit, 4)
+                cand["ce_prob"]      = round(_ce_sigmoid(logit), 4)
+                cand["hybrid_score"] = hs
+                cand["final_score"]  = round(min(100.0, max(0.0, blended)), 2)
+            logger.info(
+                "[final_ranker] CE reranking applied to %d candidates "
+                "(hybrid blend: 50%% deterministic + 50%% CE×skill_overlap).",
+                len(scored),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[final_ranker] CE reranking failed (%s) — "
+                "using deterministic scores only.",
+                exc,
+            )
+    else:
+        # Mark CE as not run so downstream (XAI) knows to skip SHAP
+        for cand in scored:
+            cand.setdefault("ce_logit",     0.0)
+            cand.setdefault("ce_prob",      0.0)
+            cand.setdefault("hybrid_score", 0.0)
+
+    # ── Phase 3: sort pool → assign rank + pool-relative label ───────────────
     # This is the comparative step — all candidates must be scored first.
     scored.sort(key=lambda c: c["final_score"], reverse=True)
     pool_size = len(scored)
     top_score = scored[0]["final_score"] if scored else 0.0
 
     for rank, cand in enumerate(scored, start=1):
-        cand["rank_in_pool"] = rank
-        cand["total_in_pool"] = pool_size
-        cand["top_score"] = top_score
-        cand["score_gap_to_top"] = round(top_score - cand["final_score"], 2)
-        cand["recommendation"] = _pool_relative_label(
+        cand["rank_in_pool"]       = rank
+        cand["total_in_pool"]      = pool_size
+        cand["top_score"]          = top_score
+        cand["score_gap_to_top"]   = round(top_score - cand["final_score"], 2)
+        label = _pool_relative_label(
             rank=rank,
             score=cand["final_score"],
             top_score=top_score,
             pool_size=pool_size,
         )
-        cand["absolute_tier"] = _absolute_tier(cand["final_score"])
+        # Honour experience floor: never label under-experienced candidate above "Maybe"
+        if cand.get("exp_floor_applied") and label in ("Strong Hire", "Hire", "Strong Runner-Up"):
+            label = "Maybe"
+            cand.setdefault("applied_fixes", []).append(
+                "[EXP-FLOOR] Under-experienced vs JD requirements — label capped at Maybe"
+            )
+        cand["recommendation"] = label
+        cand["absolute_tier"]  = _absolute_tier(cand["final_score"])
+
+    # ── Phase 4: XAI explanation cards (optional) ───────────────────────────
+    # Compute SHAP word attributions ONLY for top-K (SHAP_K) candidates.
+    # xai_service uses AutoTokenizer-based SHAP masker to match WordPiece tokenization.
+    if _XAI_SERVICE_AVAILABLE and scored:
+        try:
+            explainer, _tokenizer = _build_shap_explainer()
+            shap_k = min(int(_XAI_SHAP_K), SHAP_K)
+            scored = _generate_explanations_for_pool(
+                ranked_candidates=scored,
+                jd=jd,
+                explainer=explainer,
+                shap_k=shap_k,
+            )
+            logger.info(
+                "[final_ranker] XAI HR explanations generated (shap_k=%d).",
+                shap_k,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[final_ranker] XAI explanation generation failed (%s) — continuing without HR cards.",
+                exc,
+            )
 
     logger.info(
         "[final_ranker] Ranked %d candidates (%s). Top score: %.1f — labels: %s",
@@ -1553,8 +2539,9 @@ def final_ranker_node(state: RankingState) -> RankingState:
 def _format_ai_insights(cand: dict) -> str:
     """
     Build a structured ai_insights string that captures the full scoring
-    narrative: mode, score breakdown, GenAI evidence, and the LLM's
-    technical depth notes.  Stored in semantic_analysis_reports.ai_insights.
+    narrative: mode, score breakdown, GenAI evidence, implicit skill evidence,
+    project complexity, and LLM technical depth notes.
+    Stored in semantic_analysis_reports.ai_insights.
     """
     det = cand.get("det_scores", {})
     llm = cand.get("llm_scores", {})
@@ -1566,6 +2553,10 @@ def _format_ai_insights(cand: dict) -> str:
     top = cand.get("top_score", "?")
     gap = cand.get("score_gap_to_top", 0)
     fixes = cand.get("applied_fixes", [])
+    implicit_skills = cand.get("implicit_skills", [])
+    complexity_score = cand.get("project_complexity_score", 0.0)
+    complexity_dims = cand.get("complexity_dimensions", [])
+    complexity_boost = cand.get("complexity_boost_applied", 0.0)
 
     def w(key: str) -> str:
         return f"{weights.get(key, 0) * 100:.0f}%"
@@ -1574,19 +2565,78 @@ def _format_ai_insights(cand: dict) -> str:
     proj_depth = cs.get("project_depth", llm.get("project_depth", 0))
 
     breakdown = (
-        f"  • Technical Match  ({w('technical_match')} weight): {cs.get('technical_match', det.get('technical_match', 0)):.0f}/100\n"
-        f"  • Project Depth    ({w('project_depth')} weight): {proj_depth:.0f}/100\n"
-        f"  • Education Fit    ({w('education_fit')} weight): {cs.get('education_fit', det.get('education_fit', 0)):.0f}/100\n"
+        f"  • Technical Match    ({w('technical_match')} weight): {cs.get('technical_match', det.get('technical_match', 0)):.0f}/100\n"
+        f"  • Project Depth      ({w('project_depth')} weight): {proj_depth:.0f}/100\n"
+        f"  • Education Fit      ({w('education_fit')} weight): {cs.get('education_fit', det.get('education_fit', 0)):.0f}/100\n"
         f"  • Experience Quality ({w('experience_quality')} weight): {cs.get('experience_quality', det.get('experience_quality', 0)):.0f}/100\n"
-        f"  • Soft Skills      ({w('soft_skills')} weight): {cs.get('soft_skills', det.get('soft_skills', 0)):.0f}/100\n"
-        f"  • Training Score   ({w('training_score')} weight): {cs.get('training_score', det.get('training_score', 0)):.0f}/100\n"
-        f"  • Nice-to-Have     ({w('nice_to_have')} weight): {cs.get('nice_to_have', det.get('nice_to_have', 0)):.0f}/100\n"
+        f"  • Soft Skills        ({w('soft_skills')} weight): {cs.get('soft_skills', det.get('soft_skills', 0)):.0f}/100\n"
+        f"  • Training Score     ({w('training_score')} weight): {cs.get('training_score', det.get('training_score', 0)):.0f}/100\n"
+        f"  • Nice-to-Have       ({w('nice_to_have')} weight): {cs.get('nice_to_have', det.get('nice_to_have', 0)):.0f}/100\n"
+        f"  • Project Complexity (bonus signal): {det.get('project_complexity', 0):.0f}/100 "
+        f"→ +{complexity_boost:.1f}pt boost\n"
         f"  • GenAI Bonus: +{genai.get('bonus', 0):.0f}pt "
         f"(context: {genai.get('context', 'none')}, "
         f"terms: {', '.join(genai.get('evidence', [])) or 'none found'})"
     )
 
+    # Implicit skill evidence section
+    if implicit_skills:
+        impl_lines = "\n".join(
+            f"  • [{skill}] — evidenced: \"{snippet}\""
+            for skill, snippet in implicit_skills
+        )
+        implicit_section = f"\nImplicit Skills (demonstrated in context):\n{impl_lines}"
+    else:
+        implicit_section = "\nImplicit Skills: none detected"
+
+    # Project complexity breakdown section
+    if complexity_dims:
+        dims_str = ", ".join(complexity_dims)
+        complexity_section = (
+            f"\nProject Complexity Analysis:\n"
+            f"  Score: {complexity_score:.2f}/1.00 ({len(complexity_dims)}/4 dimensions)\n"
+            f"  Dimensions matched: {dims_str}\n"
+            f"  Boost applied: +{complexity_boost:.1f} pts"
+        )
+    else:
+        complexity_section = "\nProject Complexity: no complexity signals detected"
+
+    # ── SHAP-style feature attribution (Gold Standard XAI concept) ────────────
+    # For a linear weighted-sum model, Shapley value of feature i = weight_i × score_i.
+    # Sorted descending by contribution — equivalent to SHAP's token-level output
+    # but computed deterministically without GPU or neural model overhead.
+    attribution_list = cand.get("feature_attribution", [])
+    if attribution_list:
+        attr_lines = "\n".join(
+            f"  {'▲' if a['direction'] == 'positive' else '▷'} "
+            f"{a['feature']:28s} score={a['score']:5.1f}  "
+            f"weight={a['weight_pct']:3d}%  contribution=+{a['contribution_pts']:.2f}pts"
+            for a in attribution_list
+        )
+        exp_ratio = cand.get("exp_ratio", 1.0)
+        floor_note = " ⚠ EXP-FLOOR APPLIED" if cand.get("exp_floor_applied") else ""
+        attribution_section = (
+            f"\nFeature Attribution (SHAP-equivalent, linear model):\n"
+            f"  Experience ratio: {exp_ratio:.2f}x required{floor_note}\n"
+            f"{attr_lines}"
+        )
+    else:
+        attribution_section = "\nFeature Attribution: not computed"
+
     fixes_text = "\n  ".join(fixes) if fixes else "None"
+
+    # CE reranking signal (from embedding_service hybrid scoring)
+    ce_logit = cand.get("ce_logit")
+    ce_prob  = cand.get("ce_prob")
+    hybrid   = cand.get("hybrid_score")
+    if ce_logit is not None and ce_logit != 0.0:
+        ce_section = (
+            f"\nCE Reranking (bge-reranker-v2-m3):\n"
+            f"  Logit: {ce_logit:.4f}  |  Probability: {ce_prob:.4f}  "
+            f"|  Hybrid score: {hybrid:.4f}"
+        )
+    else:
+        ce_section = "\nCE Reranking: not applied (model unavailable or CE logit=0)"
 
     return (
         f"Scoring Mode: {mode}\n"
@@ -1594,6 +2644,10 @@ def _format_ai_insights(cand: dict) -> str:
         f"Score vs Top Candidate: {cand.get('final_score')} vs {top} "
         f"(gap: {gap:.1f} pts)\n"
         f"\nScore Breakdown:\n{breakdown}\n"
+        f"{implicit_section}\n"
+        f"{complexity_section}\n"
+        f"{attribution_section}\n"
+        f"{ce_section}\n"
         f"\nApplied Fixes:\n  {fixes_text}\n"
         f"\nGPT-4o-mini Technical Notes:\n{llm.get('llm_summary', 'Not available')}"
     )
@@ -1615,7 +2669,8 @@ def _format_recommendation_summary(cand: dict) -> str:
         f"Rank #{cand.get('rank_in_pool')} of {cand.get('total_in_pool')} — "
         f"Score: {cand.get('final_score')}/100 "
         f"(weighted sum: {cand.get('weighted_sum')}, "
-        f"GenAI bonus: +{cand.get('genai_bonus_applied', 0):.0f})\n"
+        f"GenAI bonus: +{cand.get('genai_bonus_applied', 0):.0f}, "
+        f"complexity boost: +{cand.get('complexity_boost_applied', 0):.1f})\n"
         f"Score gap to top candidate: {cand.get('score_gap_to_top', 0):.1f} pts\n"
         f"\nSuggested Interview Questions:\n{q_text or '  (none generated)'}"
     )
@@ -1648,6 +2703,12 @@ def persistence_node(state: RankingState) -> RankingState:
         logger.info("[persistence] No candidates to persist.")
         return state
 
+    # Remove stale artifacts before writing new ones (idempotency)
+    try:
+        _cleanup_stale_artifacts(jr_id=int(state.get("requisition_id") or 0))
+    except Exception as exc:
+        logger.warning("[persistence] Artifact cleanup failed: %s", exc)
+
     db = SessionLocal()
     saved, failed = 0, 0
     try:
@@ -1678,6 +2739,13 @@ def persistence_node(state: RankingState) -> RankingState:
                 if existing:
                     existing.match_percentage = cand.get("final_score")
                     existing.ai_insights = ai_insights
+                    existing.hr_explanation_text = cand.get("hr_explanation")
+                    hr_json = cand.get("hr_explanation_json")
+                    existing.hr_explanation_json = (
+                        json.dumps(hr_json, ensure_ascii=False)
+                        if isinstance(hr_json, (dict, list))
+                        else (str(hr_json) if hr_json else None)
+                    )
                     existing.recommendation_summary = recommendation_summary
                     existing.strengths = strengths_text
                     existing.weaknesses = weaknesses_text
@@ -1688,6 +2756,12 @@ def persistence_node(state: RankingState) -> RankingState:
                         application_id=application_id,
                         match_percentage=cand.get("final_score"),
                         ai_insights=ai_insights,
+                        hr_explanation_text=cand.get("hr_explanation"),
+                        hr_explanation_json=(
+                            json.dumps(cand.get("hr_explanation_json"), ensure_ascii=False)
+                            if isinstance(cand.get("hr_explanation_json"), (dict, list))
+                            else (str(cand.get("hr_explanation_json")) if cand.get("hr_explanation_json") else None)
+                        ),
                         recommendation_summary=recommendation_summary,
                         strengths=strengths_text,
                         weaknesses=weaknesses_text,
@@ -1726,6 +2800,27 @@ def persistence_node(state: RankingState) -> RankingState:
             "Pool: %d candidates re-ranked.",
             saved, failed, len(ranked),
         )
+
+        # Write results.json artifact + persist its path on job_requisitions
+        try:
+            jr_id = int(state.get("requisition_id") or 0)
+            json_path = _write_results_json(jr_id=jr_id, jd=state.get("jd_data") or {}, ranked=ranked)
+
+            jr = (
+                db.query(JobRequisition)
+                .filter(JobRequisition.requisition_id == jr_id)
+                .first()
+            )
+            if jr:
+                jr.results_json_path = json_path
+                db.commit()
+                logger.info(
+                    "[persistence] results_json_path updated for requisition %d: %s",
+                    jr_id, json_path,
+                )
+        except Exception as exc:
+            db.rollback()
+            logger.warning("[persistence] Could not write/save results.json path: %s", exc)
 
     except Exception as exc:
         db.rollback()

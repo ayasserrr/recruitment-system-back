@@ -9,6 +9,8 @@ class SemanticAnalysisReport(Base):
     application_id = Column(Integer, ForeignKey("applications.application_id"), nullable=False, unique=True)
     match_percentage = Column(Numeric(5, 2), nullable=True)
     ai_insights = Column(Text, nullable=True)
+    hr_explanation_text = Column(Text, nullable=True)
+    hr_explanation_json = Column(Text, nullable=True)
     recommendation_summary = Column(Text, nullable=True)
     strengths = Column(Text, nullable=True)
     weaknesses = Column(Text, nullable=True)

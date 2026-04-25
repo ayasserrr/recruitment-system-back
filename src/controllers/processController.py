@@ -11,7 +11,7 @@ from openai import AsyncOpenAI
 from .BaseController import BaseController
 from .CompanyController import CompanyController
 from models.prompts import cv_system_prompt, cv_user_prompt
-from models.schemas.cv_schema import ParsedCVSchema
+from schemas.cv_schema import ParsedCV
 
 
 class ProcessController(BaseController):
@@ -34,7 +34,7 @@ class ProcessController(BaseController):
 
     async def extract_candidate_cv_json(
         self, company_id: str, job_id: str, candidate_id: str
-    ) -> ParsedCVSchema:
+    ) -> ParsedCV:
         """Extract PDF text → call gpt-4o-mini → validate with Pydantic.
 
         Raises ValidationError if required fields (first_name, last_name, email,
@@ -47,7 +47,7 @@ class ProcessController(BaseController):
             system_prompt=cv_system_prompt(),
             user_prompt=cv_user_prompt(cv_text=cv_text),
         )
-        return ParsedCVSchema.model_validate(raw_json)
+        return ParsedCV.model_validate(raw_json)
 
     def _get_candidate_cv_path(
         self, company_id: str, job_id: str, candidate_id: str
