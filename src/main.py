@@ -9,6 +9,10 @@ from routes.recruiter_auth import router as recruiter_auth_router
 from routes.linkedin_auth import router as linkedin_auth_router
 from database.connection import engine, Base
 import models.db
+from knowledge_db.routers.categories import router as categories_router
+from knowledge_db.routers.tools import router as tools_router
+from knowledge_db.routers.concepts import router as concepts_router
+from knowledge_db.database import create_knowledge_tables
 
 load_dotenv()
 
@@ -61,6 +65,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
+    create_knowledge_tables()
 
 # Include routers
 app.include_router(auth_router)
@@ -73,6 +78,11 @@ app.include_router(job_requisitions_router)
 app.include_router(candidates_router)
 app.include_router(jobs_router)
 app.include_router(assessment_router)
+
+# Knowledge DB routers
+app.include_router(categories_router, prefix="/api/v1/knowledge")
+app.include_router(tools_router, prefix="/api/v1/knowledge")
+app.include_router(concepts_router, prefix="/api/v1/knowledge")
 
 @app.get("/")
 def root():

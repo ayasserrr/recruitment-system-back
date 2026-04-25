@@ -12,6 +12,7 @@ langchain-community == 0.3.21
 PyMuPDF == 1.27.1
 psycopg2-binary == 2.9.10
 sqlalchemy >= 2.0
+sqlmodel >= 0.0.21
 alembic >= 1.13
 passlib[bcrypt] == 1.7.4
 python-jose[cryptography] == 3.3.0
