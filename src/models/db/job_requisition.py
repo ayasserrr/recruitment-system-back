@@ -35,6 +35,9 @@ class JobRequisition(Base):
     assessment_generated_at = Column(DateTime, nullable=True)
     hr_report_path = Column(String(500), nullable=True)
     results_json_path = Column(String(500), nullable=True)
+    # Interview phase flags
+    interview_notified = Column(Boolean, default=False, nullable=False)
+    interview_deadline = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

@@ -34,6 +34,14 @@ class settings(BaseSettings):
     # Celery / Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # LiveKit — voice interview infrastructure
+    LIVEKIT_URL: str = "wss://ai-interview-lgcdo8l6.livekit.cloud"
+    LIVEKIT_API_KEY: str = ""
+    LIVEKIT_API_SECRET: str = ""
+    LIVEKIT_WEBHOOK_SECRET: str = ""   # same as API_SECRET for signature validation
+    LIVEKIT_AGENT_NAME: str = "interview-agent"
+    PORT: int = 8787
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

@@ -7,6 +7,7 @@ from routes import base_router, data_router, rank_router, job_requisitions_route
 from routes.auth import router as auth_router
 from routes.recruiter_auth import router as recruiter_auth_router
 from routes.linkedin_auth import router as linkedin_auth_router
+from routes.interview_session import router as interview_session_router
 from database.connection import engine, Base
 import models.db
 from knowledge_db.routers.categories import router as categories_router
@@ -79,6 +80,7 @@ app.include_router(candidates_router)
 app.include_router(jobs_router)
 app.include_router(assessment_router)
 app.include_router(admin_router)
+app.include_router(interview_session_router)
 
 # Knowledge DB routers
 app.include_router(categories_router, prefix="/api/v1/knowledge")

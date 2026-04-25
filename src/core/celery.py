@@ -46,6 +46,7 @@ celery_app = Celery(
         "tasks.social_tasks",
         "tasks.ranking_tasks",    # ← CV ranking automation
         "tasks.assessment_tasks", # ← Technical assessment generation
+        "tasks.interview_tasks",  # ← Interview scheduling + final ranking
     ],
 )
 
@@ -86,5 +87,10 @@ celery_app.conf.beat_schedule = {
     "scan-assessment-ranking-every-minute": {
         "task": "tasks.assessment_tasks.scan_and_dispatch_assessment_ranking",
         "schedule": 60.0,
+    },
+    # Final ranking after interview deadline — checked every 5 minutes
+    "scan-final-ranking-every-5-minutes": {
+        "task": "tasks.interview_tasks.scan_and_dispatch_final_ranking",
+        "schedule": 300.0,
     },
 }

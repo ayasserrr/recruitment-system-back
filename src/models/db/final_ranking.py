@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Column, Integer, String, Text, Numeric, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from database.connection import Base
 
@@ -16,6 +16,9 @@ class FinalRanking(Base):
     final_rank = Column(Integer, nullable=True)
     final_recommendation = Column(String(100), nullable=True)
     final_status = Column(String(50), nullable=True)
+    # Red-flag: CV #1 but failed live technical interview
+    red_flag = Column(Boolean, default=False, nullable=False)
+    red_flag_reason = Column(Text, nullable=True)
     generated_at = Column(DateTime, server_default=func.now())
 
     application = relationship("Application", back_populates="final_ranking")

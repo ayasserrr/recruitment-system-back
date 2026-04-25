@@ -47,8 +47,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional, TypedDict
 
+import asyncio
 import httpx
-from langgraph.graph import END, StateGraph
+from langgraph.graph import StateGraph, END
 from sqlalchemy.orm import joinedload
 
 # Optional: embedding_service provides CE reranking + hybrid scoring.
@@ -2848,6 +2849,96 @@ def _route_after_scoring(state: RankingState) -> str:
     return "abort" if state.get("error") else "continue"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 7 — Technical Interview (Optional for top candidates)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def technical_interview_node(state: RankingState) -> RankingState:
+    """
+    Conduct technical interviews for top-ranked candidates using the
+    Technical_Interview_Agent. Only triggers for candidates with
+    recommendation "Strongly Recommend Interview" or "Consider for Interview".
+    """
+    # Lazy import — heavy ML libraries (whisper, torch, etc.) must not load at startup
+    try:
+        from .technical_interview_agent import interview_agent, InterviewMode  # noqa: PLC0415
+    except Exception as _import_exc:
+        logger.warning("[technical_interview] Agent unavailable — skipping: %s", _import_exc)
+        return state
+
+    ranked_candidates = state.get("ranked_candidates", [])
+    if not ranked_candidates:
+        logger.info("[technical_interview] No candidates to interview")
+        return state
+    
+    # Filter candidates eligible for interview
+    interview_eligible = [
+        cand for cand in ranked_candidates
+        if cand.get("recommendation") in ["Strongly Recommend Interview", "Consider for Interview"]
+    ]
+    
+    if not interview_eligible:
+        logger.info("[technical_interview] No candidates eligible for interview")
+        return state
+    
+    logger.info(f"[technical_interview] Starting interviews for {len(interview_eligible)} candidates")
+    
+    # Conduct interviews asynchronously
+    interview_results = []
+    for cand in interview_eligible:
+        try:
+            application_id = cand.get("application_id")
+            if not application_id:
+                continue
+            
+            # Determine interview mode based on job requirements
+            jd_data = state.get("jd_data", {})
+            mode = InterviewMode.TECHNICAL  # Default to technical mode
+            
+            # Conduct interview with Focused Interviewer Persona (5-round structure)
+            session = asyncio.run(interview_agent.conduct_interview(application_id, mode, use_persona="focused"))
+            
+            # Generate scorecard
+            scorecard = interview_agent.generate_candidate_scorecard(session)
+            
+            # Update candidate data with interview results
+            cand["interview_session_id"] = session.session_id
+            cand["interview_score"] = session.final_score
+            cand["combined_score"] = scorecard["scores"]["combined_score"]
+            cand["interview_completed_at"] = session.completed_at.isoformat() if session.completed_at else None
+            cand["final_recommendation"] = scorecard["recommendation"]
+            
+            interview_results.append({
+                "application_id": application_id,
+                "session_id": session.session_id,
+                "scorecard": scorecard
+            })
+            
+            logger.info(
+                f"[technical_interview] Interview completed for candidate {cand.get('candidate_name')}. "
+                f"Score: {session.final_score:.2f}, Combined: {scorecard['scores']['combined_score']:.2f}"
+            )
+            
+        except Exception as exc:
+            logger.error(
+                f"[technical_interview] Interview failed for candidate {cand.get('candidate_name')}: {exc}"
+            )
+            # Mark interview as failed but keep candidate in pipeline
+            cand["interview_failed"] = True
+            cand["interview_error"] = str(exc)
+    
+    # Sort candidates by combined score (screening + interview)
+    ranked_candidates.sort(key=lambda c: c.get("combined_score", c.get("final_score", 0)), reverse=True)
+    
+    logger.info(f"[technical_interview] Completed {len(interview_results)} interviews")
+    
+    return {
+        **state,
+        "ranked_candidates": ranked_candidates,
+        "interview_results": interview_results
+    }
+
+
 def _build_ranking_graph():
     graph = StateGraph(RankingState)
 
@@ -2857,6 +2948,7 @@ def _build_ranking_graph():
     graph.add_node("genai_validator", genai_validator_node)
     graph.add_node("final_ranker", final_ranker_node)
     graph.add_node("persistence", persistence_node)
+    graph.add_node("technical_interview", technical_interview_node)
 
     graph.set_entry_point("context_gatherer")
 
@@ -2873,7 +2965,8 @@ def _build_ranking_graph():
     graph.add_edge("llm_qualitative", "genai_validator")
     graph.add_edge("genai_validator", "final_ranker")
     graph.add_edge("final_ranker", "persistence")
-    graph.add_edge("persistence", END)
+    graph.add_edge("persistence", "technical_interview")
+    graph.add_edge("technical_interview", END)
 
     return graph.compile()
 

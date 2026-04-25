@@ -570,6 +570,14 @@ def run_relative_grading(self, requisition_id: int) -> dict:
         result.get("top_score") or 0.0,
     )
 
+    # Bridge: dispatch interview invitations for all non-rejected candidates
+    from tasks.interview_tasks import send_interview_invitations  # avoid circular at module level
+    send_interview_invitations.delay(requisition_id)
+    logger.info(
+        "[relative_grading] Dispatched interview invitations for requisition %d.",
+        requisition_id,
+    )
+
     return {
         "requisition_id": requisition_id,
         "success": True,
