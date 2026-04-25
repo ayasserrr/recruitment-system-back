@@ -15,3 +15,4 @@ class AssessmentTemplateQuestion(Base):
 
     template = relationship("AssessmentTemplate", back_populates="questions")
     answers = relationship("AssessmentAnswer", back_populates="question")
+    generated_question = relationship("GeneratedAssessmentQuestion", back_populates="template_question", uselist=False)

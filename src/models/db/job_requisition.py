@@ -31,6 +31,8 @@ class JobRequisition(Base):
     cv_collection_end_date = Column(Date, nullable=True)
     status = Column(String(50), default="Draft")
     shortlist_notified = Column(Boolean, nullable=True, default=False)
+    assessment_generated = Column(Boolean, default=False)
+    assessment_generated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -43,3 +45,5 @@ class JobRequisition(Base):
     technical_assessment_config = relationship("TechnicalAssessmentConfig", back_populates="requisition", uselist=False)
     technical_interview_config = relationship("TechnicalInterviewConfig", back_populates="requisition", uselist=False)
     hr_interview_config = relationship("HRInterviewConfig", back_populates="requisition", uselist=False)
+    generated_questions = relationship("GeneratedAssessmentQuestion", back_populates="job_requisition")
+    question_sets = relationship("AssessmentQuestionSet", back_populates="job_requisition")

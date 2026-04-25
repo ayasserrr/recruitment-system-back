@@ -24,8 +24,11 @@ from fastapi.responses import JSONResponse
 
 from database.connection import SessionLocal
 from models.db.assessment_answer import AssessmentAnswer
+from models.db.assessment_question_set import AssessmentQuestionSet
 from models.db.assessment_template_question import AssessmentTemplateQuestion
 from models.db.candidate_assessment import CandidateAssessment
+from models.db.generated_assessment_question import GeneratedAssessmentQuestion
+from models.db.job_requisition import JobRequisition
 from models.db.technical_assessment_config import TechnicalAssessmentConfig
 from models.db.application import Application
 from models.db.job_posting import JobPosting
@@ -67,6 +70,38 @@ def _check_deadline(assessment: CandidateAssessment, db) -> None:
             )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_jr_id_for_assessment(assessment: "CandidateAssessment", db) -> Optional[int]:
+    """Walk CandidateAssessment → Application → JobPosting → requisition_id."""
+    try:
+        app = db.query(Application).filter(
+            Application.application_id == assessment.application_id
+        ).first()
+        if not app:
+            return None
+        posting = db.query(JobPosting).filter(
+            JobPosting.posting_id == app.posting_id
+        ).first()
+        return posting.requisition_id if posting else None
+    except Exception:
+        return None
+
+
+def _load_options_for_template_question(template_question_id: Optional[int], db) -> Optional[list]:
+    """Fetch parsed options from AssessmentTemplateQuestion for a given question_id."""
+    if not template_question_id:
+        return None
+    try:
+        tq = db.query(AssessmentTemplateQuestion).filter(
+            AssessmentTemplateQuestion.question_id == template_question_id
+        ).first()
+        if tq and tq.options:
+            return json.loads(tq.options)
+    except Exception:
+        pass
+    return None
+
 
 assessment_router = APIRouter(
     prefix="/api/v1/assessment",
@@ -110,16 +145,9 @@ def get_assessment(
 
         _check_deadline(assessment, db)
 
-        questions = (
-            db.query(AssessmentTemplateQuestion)
-            .filter(AssessmentTemplateQuestion.template_id == assessment.template_id)
-            .all()
-        )
-
         # Fetch time limit from config for the frontend countdown timer
         time_limit = None
         try:
-            from models.db.technical_assessment_config import TechnicalAssessmentConfig
             cfg = (
                 db.query(TechnicalAssessmentConfig)
                 .filter(TechnicalAssessmentConfig.config_id == assessment.config_id)
@@ -129,6 +157,68 @@ def get_assessment(
                 time_limit = cfg.time_limit_minutes
         except Exception:
             pass
+
+        # ── Determine which question source to use ────────────────────────────
+        # If the JR used the knowledge-based generator, serve from
+        # generated_assessment_questions ordered by assessment_question_sets.position
+        # and return template_question_id as question_id so grading works unchanged.
+        jr_id = _get_jr_id_for_assessment(assessment, db)
+        use_knowledge_questions = False
+        if jr_id is not None:
+            jr: Optional[JobRequisition] = (
+                db.query(JobRequisition)
+                .filter(JobRequisition.requisition_id == jr_id)
+                .first()
+            )
+            use_knowledge_questions = bool(jr and jr.assessment_generated)
+
+        if use_knowledge_questions:
+            ordered_sets = (
+                db.query(AssessmentQuestionSet)
+                .filter(AssessmentQuestionSet.jr_id == jr_id)
+                .order_by(AssessmentQuestionSet.position)
+                .all()
+            )
+            gq_ids = [qs.question_id for qs in ordered_sets]
+            gq_map: dict[int, GeneratedAssessmentQuestion] = {
+                gq.id: gq
+                for gq in db.query(GeneratedAssessmentQuestion)
+                .filter(GeneratedAssessmentQuestion.id.in_(gq_ids))
+                .all()
+            }
+            questions_payload = []
+            for qs in ordered_sets:
+                gq = gq_map.get(qs.question_id)
+                if not gq or not gq.is_active:
+                    continue
+                # Return template_question_id as question_id so the submit
+                # endpoint and grading pipeline work without modification.
+                questions_payload.append({
+                    "question_id": gq.template_question_id,
+                    "question_text": gq.question_text,
+                    "question_type": gq.question_type,
+                    "points": 10,
+                    "options": _load_options_for_template_question(gq.template_question_id, db),
+                    "concept_name": gq.concept_name,
+                    "tool_name": gq.tool_name,
+                })
+        else:
+            # Legacy path: serve directly from AssessmentTemplateQuestion
+            tqs = (
+                db.query(AssessmentTemplateQuestion)
+                .filter(AssessmentTemplateQuestion.template_id == assessment.template_id)
+                .all()
+            )
+            questions_payload = [
+                {
+                    "question_id": q.question_id,
+                    "question_text": q.question_text,
+                    "question_type": q.question_type,
+                    "points": q.points,
+                    "options": json.loads(q.options) if q.options else None,
+                }
+                for q in tqs
+            ]
 
         if assessment.status == "Pending":
             assessment.status = "In Progress"
@@ -141,16 +231,7 @@ def get_assessment(
                 "assessment_id": assessment_id,
                 "status": assessment.status,
                 "time_limit_minutes": time_limit,
-                "questions": [
-                    {
-                        "question_id": q.question_id,
-                        "question_text": q.question_text,
-                        "question_type": q.question_type,
-                        "points": q.points,
-                        "options": json.loads(q.options) if q.options else None,
-                    }
-                    for q in questions
-                ],
+                "questions": questions_payload,
             },
         )
     finally:

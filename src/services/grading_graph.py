@@ -1,15 +1,16 @@
 """
 AI Grading LangGraph Workflow
-══════════════════════════════
 Called synchronously from POST /api/v1/assessment/{id}/submit.
 
 Graph nodes (sequential):
   1. load_submission_node    – loads CandidateAssessment + all template questions from DB;
-                               maps submitted answers onto the question list
+                               enriches each question with required_keywords from
+                               generated_assessment_questions (where template_question_id matches)
   2. ai_grader_node          – grades every answer:
                                  MCQ        → exact letter-match (no LLM needed)
-                                 open_ended → GPT-4o-mini with the exact required prompt;
-                                              falls back to score=0 + "Manual Review" on error
+                                 open_ended → keyword-grounded GPT-4o-mini prompt when
+                                              required_keywords is present; falls back to
+                                              model-answer grading when empty
   3. aggregate_scores_node   – sums scores, calculates score_pct, determines passed/failed,
                                persists AssessmentAnswer rows + updates CandidateAssessment
   4. generate_report_node    – GPT-4o-mini builds AssessmentReport (strengths, weaknesses,
@@ -39,6 +40,7 @@ from models.db.assessment_answer import AssessmentAnswer
 from models.db.assessment_report import AssessmentReport
 from models.db.assessment_template_question import AssessmentTemplateQuestion
 from models.db.candidate_assessment import CandidateAssessment
+from models.db.generated_assessment_question import GeneratedAssessmentQuestion
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +165,19 @@ def load_submission_node(state: GradingState) -> GradingState:
         if not questions_db:
             return {**state, "error": "No questions found in this assessment template."}
 
+        # ── Enrich with required_keywords from generated_assessment_questions ──
+        # Look up by template_question_id (the FK that links the two tables).
+        # Works for both knowledge-grounded questions and "general LLM" fallbacks
+        # (concept_id IS NULL) — required_keywords is always populated.
+        question_ids = [q.question_id for q in questions_db]
+        gq_by_tq_id: dict[int, GeneratedAssessmentQuestion] = {
+            gq.template_question_id: gq
+            for gq in db.query(GeneratedAssessmentQuestion)
+            .filter(GeneratedAssessmentQuestion.template_question_id.in_(question_ids))
+            .all()
+            if gq.template_question_id is not None
+        }
+
         questions = []
         for q in questions_db:
             model_answer = q.correct_answer or ""
@@ -174,6 +189,20 @@ def load_submission_node(state: GradingState) -> GradingState:
                     model_answer = stored.get("answer", model_answer)
                 except json.JSONDecodeError:
                     pass
+
+            gq = gq_by_tq_id.get(q.question_id)
+            required_keywords: list[str] = []
+            if gq:
+                kw = gq.required_keywords
+                if isinstance(kw, list) and kw:
+                    required_keywords = [str(k) for k in kw]
+                elif not kw:
+                    logger.warning(
+                        "[load_submission] question_id=%d has a generated_assessment_question "
+                        "but required_keywords is empty — will fall back to model-answer grading.",
+                        q.question_id,
+                    )
+
             questions.append({
                 "question_id": q.question_id,
                 "question_text": q.question_text,
@@ -182,10 +211,16 @@ def load_submission_node(state: GradingState) -> GradingState:
                 "correct_answer": model_answer,
                 "grading_guide": grading_guide,
                 "options": json.loads(q.options) if q.options else None,
+                "required_keywords": required_keywords,  # [] for legacy questions
+                "concept_id": gq.concept_id if gq else None,  # None = general LLM fallback
             })
 
         passing_score = float(assessment.passing_score) if assessment.passing_score else None
-        logger.info("[load_submission] Assessment %d — %d questions loaded.", assessment_id, len(questions))
+        logger.info(
+            "[load_submission] Assessment %d — %d questions loaded (%d with required_keywords).",
+            assessment_id, len(questions),
+            sum(1 for q in questions if q["required_keywords"]),
+        )
 
         return {
             **state,
@@ -223,32 +258,72 @@ def _grade_open_ended(
     correct_answer: str,
     grading_guide: str,
     points: int,
+    required_keywords: list[str] | None = None,
 ) -> tuple[float, str]:
     """
-    GPT-4o-mini grader with the exact required prompt.
-    Falls back to score=0 + 'Manual Review Required' on any failure.
+    GPT-4o-mini grader for open-ended questions.
+
+    Two grading modes depending on whether required_keywords is populated:
+
+    Keyword-grounded mode (knowledge-based assessments):
+      Uses required_keywords as the Ground Truth. The candidate must demonstrate
+      semantic understanding of these concepts — verbatim mention is NOT required.
+      Score reflects how many core concepts were correctly addressed.
+
+    Model-answer mode (legacy / fallback):
+      Uses correct_answer + grading_guide as the reference.
+      Falls back to score=0 + "Manual Review Required" on LLM failure.
     """
     if not candidate_answer.strip():
         return 0.0, "No answer provided."
 
-    user_msg = (
-        f"You are a strict but fair technical examiner. Grade the candidate's answer using the "
-        f"reference answer and grading guide below. Apply partial credit where justified.\n\n"
-        f"Question: {question_text}\n\n"
-        f"Reference Answer: {correct_answer}\n\n"
-        f"Grading Guide: {grading_guide or 'Full marks for a technically complete and accurate answer.'}\n\n"
-        f"Candidate Answer: {candidate_answer}\n\n"
-        f"Scoring rules:\n"
-        f"  - Full marks ({points}): Candidate demonstrates clear mastery — hits all key concepts, "
-        f"shows practical understanding, no significant errors.\n"
-        f"  - Partial credit (1-{points-1}): Answer is partially correct — covers some key concepts "
-        f"but misses critical points, has minor technical inaccuracies, or lacks depth.\n"
-        f"  - Zero (0): Answer is wrong, off-topic, vague to the point of uselessness, or not provided.\n\n"
-        f"Respond ONLY with valid JSON — no prose outside the JSON:\n"
-        f"{{\"score\": <integer 0-{points}>, "
-        f"\"ai_feedback\": \"<2-3 sentences: state what was correct, what was missing or wrong, "
-        f"and one specific improvement the candidate should study>\"}}"
-    )
+    use_keywords = bool(required_keywords)
+
+    if use_keywords:
+        keywords_str = ", ".join(f'"{kw}"' for kw in required_keywords)
+        user_msg = (
+            f"You are a strict but fair technical examiner grading a candidate's answer.\n\n"
+            f"Question: {question_text}\n\n"
+            f"Required Concepts (Ground Truth): [{keywords_str}]\n\n"
+            f"Model Answer (for reference): {correct_answer or '(not provided)'}\n\n"
+            f"Grading Criteria: {grading_guide or 'Full marks for a technically complete and accurate answer.'}\n\n"
+            f"Candidate Answer: {candidate_answer}\n\n"
+            f"GRADING INSTRUCTION:\n"
+            f"Compare the candidate's answer against the Required Concepts above. "
+            f"The candidate does NOT need to mention these concepts verbatim, but must "
+            f"demonstrate a clear semantic understanding of each one. "
+            f"Score based on how many of these core concepts were correctly and meaningfully addressed.\n\n"
+            f"Scoring rules:\n"
+            f"  - Full marks ({points}): Demonstrates clear understanding of ALL or nearly all "
+            f"required concepts with accurate, production-grade reasoning.\n"
+            f"  - Partial credit (1-{points - 1}): Covers SOME concepts correctly but misses "
+            f"critical ones, or addresses them with significant inaccuracies.\n"
+            f"  - Zero (0): Answer is wrong, vague, off-topic, or addresses none of the required concepts.\n\n"
+            f"Respond ONLY with valid JSON:\n"
+            f"{{\"score\": <integer 0-{points}>, "
+            f"\"ai_feedback\": \"<2-3 sentences: which required concepts were demonstrated, "
+            f"which were missing or incorrect, and one specific improvement the candidate should study>\"}}"
+        )
+    else:
+        # Legacy / fallback: grade against model answer + grading guide
+        user_msg = (
+            f"You are a strict but fair technical examiner. Grade the candidate's answer using the "
+            f"reference answer and grading guide below. Apply partial credit where justified.\n\n"
+            f"Question: {question_text}\n\n"
+            f"Reference Answer: {correct_answer}\n\n"
+            f"Grading Guide: {grading_guide or 'Full marks for a technically complete and accurate answer.'}\n\n"
+            f"Candidate Answer: {candidate_answer}\n\n"
+            f"Scoring rules:\n"
+            f"  - Full marks ({points}): Candidate demonstrates clear mastery — hits all key concepts, "
+            f"shows practical understanding, no significant errors.\n"
+            f"  - Partial credit (1-{points - 1}): Answer is partially correct — covers some key concepts "
+            f"but misses critical points, has minor technical inaccuracies, or lacks depth.\n"
+            f"  - Zero (0): Answer is wrong, off-topic, vague to the point of uselessness, or not provided.\n\n"
+            f"Respond ONLY with valid JSON — no prose outside the JSON:\n"
+            f"{{\"score\": <integer 0-{points}>, "
+            f"\"ai_feedback\": \"<2-3 sentences: state what was correct, what was missing or wrong, "
+            f"and one specific improvement the candidate should study>\"}}"
+        )
 
     raw = _llm_call(
         messages=[
@@ -282,8 +357,9 @@ def _grade_open_ended(
 def ai_grader_node(state: GradingState) -> GradingState:
     """
     Grades every answer:
-      MCQ        → exact letter-match
-      open_ended → GPT-4o-mini with the required prompt
+      MCQ        → exact letter-match (no LLM needed)
+      open_ended → keyword-grounded prompt when required_keywords is present;
+                   falls back to model-answer prompt for legacy questions
     Never raises — errors produce score=0 + 'Manual Review Required'.
     """
     submitted_map = {a["question_id"]: a["candidate_answer"] for a in state["submitted_answers"]}
@@ -292,6 +368,7 @@ def ai_grader_node(state: GradingState) -> GradingState:
     for q in state["questions"]:
         qid = q["question_id"]
         candidate_answer = submitted_map.get(qid, "")
+        required_keywords: list[str] = q.get("required_keywords") or []
 
         try:
             if not candidate_answer:
@@ -303,12 +380,19 @@ def ai_grader_node(state: GradingState) -> GradingState:
                     points=q["points"],
                 )
             else:
+                if not required_keywords:
+                    logger.warning(
+                        "[ai_grader] question_id=%d has no required_keywords — "
+                        "falling back to model-answer grading.",
+                        qid,
+                    )
                 score_awarded, ai_feedback = _grade_open_ended(
                     question_text=q["question_text"],
                     candidate_answer=candidate_answer,
                     correct_answer=q["correct_answer"],
                     grading_guide=q["grading_guide"],
                     points=q["points"],
+                    required_keywords=required_keywords or None,
                 )
         except Exception as exc:
             logger.warning("[ai_grader] Unexpected error grading question %d: %s", qid, exc)
@@ -320,7 +404,11 @@ def ai_grader_node(state: GradingState) -> GradingState:
             "score_awarded": score_awarded,
             "ai_feedback": ai_feedback,
         })
-        logger.debug("[ai_grader] Q%d (%s): %.1f/%d — %s", qid, q["question_type"], score_awarded, q["points"], ai_feedback[:60])
+        logger.debug(
+            "[ai_grader] Q%d (%s, keywords=%d): %.1f/%d — %s",
+            qid, q["question_type"], len(required_keywords),
+            score_awarded, q["points"], ai_feedback[:60],
+        )
 
     logger.info("[ai_grader] Graded %d questions for assessment %d.", len(graded), state["assessment_id"])
     return {**state, "graded_answers": graded}
