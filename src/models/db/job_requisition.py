@@ -38,6 +38,10 @@ class JobRequisition(Base):
     # Interview phase flags
     interview_notified = Column(Boolean, default=False, nullable=False)
     interview_deadline = Column(DateTime, nullable=True)
+    # Pipeline concurrency guard — prevents duplicate Celery dispatches
+    # Values: 'idle' | 'processing' | 'error'
+    processing_status = Column(String(20), default="idle", nullable=False, server_default="idle")
+    processing_started_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

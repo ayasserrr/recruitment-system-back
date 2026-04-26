@@ -207,18 +207,33 @@ def search_for_jd(
 
     try:
         from qdrant_client.models import Filter, FieldCondition, MatchValue  # type: ignore
-        hits = client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=jd_vector,
-            query_filter=Filter(
-                must=[FieldCondition(key="jd_id", match=MatchValue(value=jd_id))]
-            ),
-            limit=top_k,
-            with_payload=True,
+        qfilter = Filter(
+            must=[FieldCondition(key="jd_id", match=MatchValue(value=jd_id))]
         )
+
+        # qdrant-client ≥1.7 removed client.search() — use query_points() instead.
+        # client.search() is kept as a fallback for installations still on <1.7.
+        if hasattr(client, "query_points"):
+            response = client.query_points(
+                collection_name=COLLECTION_NAME,
+                query=jd_vector,
+                query_filter=qfilter,
+                limit=top_k,
+                with_payload=True,
+            )
+            raw_hits = response.points
+        else:
+            raw_hits = client.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=jd_vector,
+                query_filter=qfilter,
+                limit=top_k,
+                with_payload=True,
+            )
+
         results = [
             {"cv_id": h.id, "score": round(h.score, 4), **(h.payload or {})}
-            for h in hits
+            for h in raw_hits
         ]
         logger.info(
             "[qdrant_service] search_for_jd jd_id=%d — retrieved %d candidates (top_k=%d).",
@@ -244,14 +259,24 @@ def delete_jd_vectors(jd_id: int) -> int:
 
     try:
         from qdrant_client.models import Filter, FieldCondition, MatchValue  # type: ignore
-        result = client.delete(
+        qfilter = Filter(
+            must=[FieldCondition(key="jd_id", match=MatchValue(value=jd_id))]
+        )
+
+        # qdrant-client ≥1.7 requires a FilterSelector wrapper around the Filter
+        # when used as points_selector; older clients accept Filter directly.
+        try:
+            from qdrant_client.models import FilterSelector  # type: ignore
+            selector = FilterSelector(filter=qfilter)
+        except ImportError:
+            selector = qfilter  # type: ignore[assignment]  # pre-1.7 fallback
+
+        client.delete(
             collection_name=COLLECTION_NAME,
-            points_selector=Filter(
-                must=[FieldCondition(key="jd_id", match=MatchValue(value=jd_id))]
-            ),
+            points_selector=selector,
         )
         logger.info("[qdrant_service] Deleted vectors for jd_id=%d.", jd_id)
-        return getattr(result, "deleted", -1)
+        return 0
     except Exception as exc:
         logger.error("[qdrant_service] delete_jd_vectors failed for jd_id=%d: %s", jd_id, exc)
         return -1

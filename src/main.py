@@ -8,6 +8,16 @@ from routes.auth import router as auth_router
 from routes.recruiter_auth import router as recruiter_auth_router
 from routes.linkedin_auth import router as linkedin_auth_router
 from routes.interview_session import router as interview_session_router
+from routes.frontend_jobs import router as frontend_jobs_router
+from routes.pipeline import router as pipeline_router
+from routes.apply import router as apply_router
+from routes.semantic_frontend import router as semantic_router
+from routes.assessment_frontend import router as assessment_frontend_router
+from routes.technical_interview_frontend import router as tech_interview_router
+from routes.hr_interview_frontend import router as hr_interview_router
+from routes.final_ranking_frontend import router as final_ranking_router
+from routes.shortlist import router as shortlist_router
+from routes.analytics import router as analytics_router
 from database.connection import engine, Base
 import models.db
 from knowledge_db.routers.categories import router as categories_router
@@ -77,10 +87,27 @@ app.include_router(data_router)
 app.include_router(rank_router)
 app.include_router(job_requisitions_router)
 app.include_router(candidates_router)
-app.include_router(jobs_router)
 app.include_router(assessment_router)
 app.include_router(admin_router)
 app.include_router(interview_session_router)
+
+# ── Frontend / Dashboard routers ───────────────────────────────────────────────
+# frontend_jobs_router must come BEFORE the legacy jobs_router so that
+# GET /api/v1/jobs/{id} resolves to the protected dashboard endpoint.
+app.include_router(frontend_jobs_router)
+app.include_router(pipeline_router)
+app.include_router(semantic_router)
+app.include_router(assessment_frontend_router)
+app.include_router(tech_interview_router)
+app.include_router(hr_interview_router)
+app.include_router(final_ranking_router)
+app.include_router(shortlist_router)
+app.include_router(analytics_router)
+# apply_router registers its own full paths (no APIRouter prefix)
+app.include_router(apply_router)
+
+# Legacy public jobs router (kept for POST /{jid}/rank-candidates)
+app.include_router(jobs_router)
 
 # Knowledge DB routers
 app.include_router(categories_router, prefix="/api/v1/knowledge")

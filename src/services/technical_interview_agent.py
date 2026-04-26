@@ -23,6 +23,8 @@ import librosa
 from livekit import rtc
 from livekit.api import LiveKitAPI, DataPacket
 
+from core.gpu import DEVICE
+
 from models.db.semantic_analysis_report import SemanticAnalysisReport
 from models.db.job_requisition import JobRequisition
 from database.connection import SessionLocal
@@ -113,21 +115,23 @@ class TechnicalInterviewAgent:
             
         logger.info("Loading interview agent models...")
         
-        # Load Whisper for STT
-        self.whisper_model = whisper.load_model(_WHISPER_MODEL)
-        
+        # Load Whisper for STT — pin to GPU if available
+        self.whisper_model = whisper.load_model(_WHISPER_MODEL, device=DEVICE)
+
         # Load Sentence-BERT for centroid scoring
-        self.sentence_bert = SentenceTransformer(_SENTENCE_BERT_MODEL)
-        
+        self.sentence_bert = SentenceTransformer(_SENTENCE_BERT_MODEL, device=DEVICE)
+
         # Load KeyBERT for deep term detection
         self.keybert_model = KeyBERT(model=_KEYBERT_MODEL)
-        
-        # Load Silero VAD
-        torch.hub.load_repo_or_dir('snakers4/silero-vad', 'silero_vad')
-        self.vad_model = torch.hub.load('snakers4/silero-vad', 'silero_vad')
-        
+
+        # Load Silero VAD and move to the active device
+        self.vad_model, _ = torch.hub.load(
+            'snakers4/silero-vad', 'silero_vad', trust_repo=True
+        )
+        self.vad_model = self.vad_model.to(DEVICE)
+
         self._models_loaded = True
-        logger.info("All interview agent models loaded successfully")
+        logger.info("All interview agent models loaded successfully on %s", DEVICE)
     
     async def load_interview_context(self, application_id: int) -> InterviewContext:
         """
@@ -243,11 +247,11 @@ class TechnicalInterviewAgent:
             tmp_path = tmp_file.name
         
         try:
-            # Use Whisper for transcription
+            # Use Whisper for transcription; fp16 is safe on CUDA, not on CPU
             result = self.whisper_model.transcribe(
                 tmp_path,
                 language=language,  # None for auto-detection (Arabic/English)
-                fp16=False,  # Use FP32 for better compatibility
+                fp16=(DEVICE == "cuda"),
                 verbose=False
             )
             
@@ -269,8 +273,10 @@ class TechnicalInterviewAgent:
             # Convert audio to 16kHz mono for VAD
             audio, sr = librosa.load(io.BytesIO(audio_data), sr=16000)
             
-            # Use Silero VAD
-            speech_prob = self.vad_model(torch.from_numpy(audio), 16000).item()
+            # Use Silero VAD — tensor must live on the same device as the model
+            speech_prob = self.vad_model(
+                torch.from_numpy(audio).to(DEVICE), 16000
+            ).item()
             
             return speech_prob > 0.5  # Threshold for speech detection
             

@@ -28,9 +28,12 @@ Usage:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import math
 from typing import Optional
+
+from core.gpu import DEVICE
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,52 @@ _CE_FAST_MODEL_ID    = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 _biencoder:    "SentenceTransformer | None" = None  # type: ignore[name-defined]
 _crossencoder: "CrossEncoder | None"        = None  # type: ignore[name-defined]
 _ce_model_id:  str                          = _CE_DEFAULT_MODEL_ID
+
+# ── Model-load timeout ────────────────────────────────────────────────────────
+# If a model constructor hasn't returned within this many seconds the load is
+# considered hung (e.g. CUDA initialisation deadlock) and we fall back to CPU.
+_MODEL_LOAD_TIMEOUT = 300  # seconds
+
+
+# ── Thread-worker helpers (called inside ThreadPoolExecutor) ──────────────────
+
+def _load_biencoder_in_thread(model_id: str, device: str):
+    from sentence_transformers import SentenceTransformer  # type: ignore
+    return SentenceTransformer(model_id, device=device)
+
+
+def _load_crossencoder_in_thread(model_id: str, device: str, local_only: bool = False):
+    from sentence_transformers import CrossEncoder  # type: ignore
+    if not local_only:
+        return CrossEncoder(model_id, max_length=512, device=device)
+    # Try direct local_files_only param (sentence-transformers ≥2.3).
+    # Fall back to passing it through automodel/tokenizer kwargs for older versions.
+    # Either way, raises OSError immediately if the model is not in local cache —
+    # no network call, no hanging.
+    try:
+        return CrossEncoder(model_id, max_length=512, device=device, local_files_only=True)
+    except TypeError:
+        return CrossEncoder(
+            model_id, max_length=512, device=device,
+            tokenizer_args={"local_files_only": True},
+            automodel_args={"local_files_only": True},
+        )
+
+
+def _timed_load(fn, *args):
+    """
+    Run fn(*args) in a daemon thread.  Raises TimeoutError if the call
+    hasn't returned within _MODEL_LOAD_TIMEOUT seconds, or re-raises
+    any exception the worker thread threw.
+
+    executor.shutdown(wait=False) lets the hung thread keep running in the
+    background instead of blocking the caller — acceptable because a stalled
+    CUDA init cannot be interrupted from Python anyway.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future   = executor.submit(fn, *args)
+    executor.shutdown(wait=False)
+    return future.result(timeout=_MODEL_LOAD_TIMEOUT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -109,27 +158,47 @@ def ce_score_to_label(ce_logit: float) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_biencoder():
-    """Lazy-load the bi-encoder; returns None if sentence-transformers not installed."""
+    """Lazy-load the bi-encoder with timeout + CPU fallback."""
     global _biencoder
     if _biencoder is not None:
         return _biencoder
+
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        logger.info(
-            "[embedding_service] Loading bi-encoder: %s", _BIENCODER_MODEL_ID
-        )
-        _biencoder = SentenceTransformer(_BIENCODER_MODEL_ID)
-        logger.info("[embedding_service] Bi-encoder ready.")
+        from sentence_transformers import SentenceTransformer  # noqa — verify importable
     except ImportError:
         logger.warning(
             "[embedding_service] sentence-transformers not installed — "
             "encode_jd/encode_cv will return empty vectors. "
             "Install with: pip install sentence-transformers"
         )
-        _biencoder = None
-    except Exception as exc:
-        logger.error("[embedding_service] Failed to load bi-encoder: %s", exc)
-        _biencoder = None
+        return None
+
+    # Try preferred device first; on timeout/error fall back to CPU
+    devices = [DEVICE] if DEVICE == "cpu" else [DEVICE, "cpu"]
+    for dev in devices:
+        logger.info(
+            "[embedding_service] Loading bi-encoder %s on %s (timeout=%ds)...",
+            _BIENCODER_MODEL_ID, dev, _MODEL_LOAD_TIMEOUT,
+        )
+        try:
+            _biencoder = _timed_load(_load_biencoder_in_thread, _BIENCODER_MODEL_ID, dev)
+            suffix = " (CPU fallback — GPU timed out / failed)" if dev != DEVICE else ""
+            logger.info("[embedding_service] Bi-encoder ready on %s%s.", dev, suffix)
+            return _biencoder
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "[embedding_service] Bi-encoder load timed out after %ds on %s%s.",
+                _MODEL_LOAD_TIMEOUT, dev,
+                " — retrying on CPU" if dev != "cpu" else "",
+            )
+            _biencoder = None
+        except Exception as exc:
+            logger.error(
+                "[embedding_service] Bi-encoder load failed on %s: %s%s",
+                dev, exc, " — retrying on CPU" if dev != "cpu" else "",
+            )
+            _biencoder = None
+
     return _biencoder
 
 
@@ -210,32 +279,125 @@ def validate_embedding_quality(
 def _get_crossencoder(fast: bool = False):
     """
     Lazy-load the cross-encoder.
-    fast=True loads MiniLM-L-12 (130MB, ~5x faster) for low-latency scenarios.
-    fast=False loads BGE-reranker-v2-m3 (560MB, best accuracy).
+
+    Loading strategy (avoids the "stuck forever on a 560 MB download" problem):
+
+    Phase 1 — LOCAL CACHE ONLY (instant, no network call)
+      Try every candidate model × device from the local HuggingFace cache.
+      Candidate order:  [requested model, fast fallback (MiniLM)]
+      Device order:     [DEVICE, "cpu"]  (skip CPU if DEVICE is already cpu)
+      An OSError from local_files_only=True means "not cached" → try next
+      candidate immediately, no waiting.
+
+    Phase 2 — DOWNLOAD (only the 130 MB fast model, with timeout)
+      If nothing was found in cache, allow ONE network download of the fast
+      model.  Subject to _MODEL_LOAD_TIMEOUT so a dead connection can't block
+      the ranking pipeline forever.  The primary 560 MB model is never
+      downloaded on-demand — it must be pre-cached.
     """
     global _crossencoder, _ce_model_id
     target_model = _CE_FAST_MODEL_ID if fast else _CE_DEFAULT_MODEL_ID
 
-    # Reload if a different model variant is requested
     if _crossencoder is not None and _ce_model_id == target_model:
         return _crossencoder
 
     try:
-        from sentence_transformers import CrossEncoder  # type: ignore
-        logger.info("[embedding_service] Loading cross-encoder: %s", target_model)
-        _crossencoder = CrossEncoder(target_model, max_length=512)
-        _ce_model_id  = target_model
-        logger.info("[embedding_service] Cross-encoder ready.")
+        from sentence_transformers import CrossEncoder  # noqa — verify importable
     except ImportError:
         logger.warning(
             "[embedding_service] sentence-transformers not installed — "
             "rerank() will return zeros. Install with: pip install sentence-transformers"
         )
-        _crossencoder = None
-    except Exception as exc:
-        logger.error("[embedding_service] Failed to load cross-encoder: %s", exc)
-        _crossencoder = None
+        return None
 
+    devices   = [DEVICE] if DEVICE == "cpu" else [DEVICE, "cpu"]
+    # Primary model first, then small fast fallback
+    cache_candidates = [target_model]
+    if target_model != _CE_FAST_MODEL_ID:
+        cache_candidates.append(_CE_FAST_MODEL_ID)
+
+    # ── Phase 1: serve from local cache (no network, no timeout needed) ──────
+    for model_id in cache_candidates:
+        for dev in devices:
+            try:
+                model = _timed_load(_load_crossencoder_in_thread, model_id, dev, True)
+                _crossencoder = model
+                _ce_model_id  = model_id
+                if model_id != target_model:
+                    logger.warning(
+                        "[embedding_service] Primary cross-encoder %s not in local cache — "
+                        "using fast fallback %s on %s.",
+                        target_model, model_id, dev,
+                    )
+                elif dev != DEVICE:
+                    logger.warning(
+                        "[embedding_service] Cross-encoder %s loaded on CPU (GPU failed).",
+                        model_id,
+                    )
+                else:
+                    logger.info(
+                        "[embedding_service] Cross-encoder %s ready on %s (from cache).",
+                        model_id, dev,
+                    )
+                return _crossencoder
+            except concurrent.futures.TimeoutError:
+                pass  # Cache reads don't normally time out — FS issue, try next
+            except Exception:
+                pass  # OSError = not in cache; any other error → try next candidate
+
+    # ── Phase 2: download fast model (130 MB) with timeout ───────────────────
+    if target_model != _CE_FAST_MODEL_ID:
+        logger.warning(
+            "[embedding_service] Primary cross-encoder %s not in local cache. "
+            "Downloading fast fallback %s (130 MB) — subsequent runs will be instant.",
+            target_model, _CE_FAST_MODEL_ID,
+        )
+    for dev in devices:
+        logger.info(
+            "[embedding_service] Downloading %s on %s (timeout=%ds)...",
+            _CE_FAST_MODEL_ID, dev, _MODEL_LOAD_TIMEOUT,
+        )
+        try:
+            _crossencoder = _timed_load(
+                _load_crossencoder_in_thread, _CE_FAST_MODEL_ID, dev, False
+            )
+            _ce_model_id = _CE_FAST_MODEL_ID
+            if _CE_FAST_MODEL_ID != target_model:
+                logger.warning(
+                    "[embedding_service] Running with fast fallback cross-encoder %s "
+                    "on %s. To use the accurate model run: "
+                    "python -c \"from sentence_transformers import CrossEncoder; "
+                    "CrossEncoder('%s')\"",
+                    _CE_FAST_MODEL_ID, dev, target_model,
+                )
+            else:
+                logger.info(
+                    "[embedding_service] Cross-encoder %s ready on %s.",
+                    _CE_FAST_MODEL_ID, dev,
+                )
+            return _crossencoder
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "[embedding_service] Download of %s timed out after %ds on %s%s.",
+                _CE_FAST_MODEL_ID, _MODEL_LOAD_TIMEOUT, dev,
+                " — retrying on CPU" if dev != "cpu" else "",
+            )
+            _crossencoder = None
+        except Exception as exc:
+            logger.error(
+                "[embedding_service] Download of %s failed on %s: %s%s",
+                _CE_FAST_MODEL_ID, dev, exc,
+                " — retrying on CPU" if dev != "cpu" else "",
+            )
+            _crossencoder = None
+
+    logger.error(
+        "[embedding_service] All cross-encoder candidates exhausted — "
+        "rerank() will return zero logits. "
+        "Pre-cache the model: python -c \"from sentence_transformers import CrossEncoder; "
+        "CrossEncoder('%s')\"",
+        target_model,
+    )
     return _crossencoder
 
 

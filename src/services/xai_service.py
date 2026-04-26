@@ -99,13 +99,15 @@ def build_shap_explainer(model_name: str = _CE_MODEL_FOR_SHAP):
         return None, None
 
     try:
+        from core.gpu import DEVICE
+
         tokenizer = AutoTokenizer.from_pretrained(model_name)
 
         # Use the model's tokenizer as the masker — perturbations now match
         # exactly what the model tokenizes
         masker = shap.maskers.Text(tokenizer)
 
-        cross_encoder = CrossEncoder(model_name, max_length=512)
+        cross_encoder = CrossEncoder(model_name, max_length=512, device=DEVICE)
 
         def predict_fn(texts):
             # texts is a list of masked/perturbed strings produced by SHAP
