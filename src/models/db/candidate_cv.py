@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import relationship
 from database.connection import Base
 
@@ -9,6 +9,9 @@ class CandidateCV(Base):
     candidate_id = Column(Integer, ForeignKey("candidates.candidate_id"), nullable=False)
     file_url = Column(String(500), nullable=False)
     file_name = Column(String(255), nullable=True)
+    # Raw text extracted by fitz/PyMuPDF at upload time.
+    # Stored immediately so the ranking engine never needs to re-read the file.
+    extracted_text = Column(Text, nullable=True)
     uploaded_at = Column(DateTime, server_default=func.now())
     is_primary = Column(Boolean, default=False)
 

@@ -28,6 +28,7 @@ from core.gpu import DEVICE
 from models.db.semantic_analysis_report import SemanticAnalysisReport
 from models.db.job_requisition import JobRequisition
 from database.connection import SessionLocal
+from .interview_types import InterviewMode, InterviewContext, QuestionResponse, InterviewSession  # noqa: F401 (re-exported)
 from .senior_interviewer_persona import senior_interviewer
 from .elite_interviewer_persona import elite_interviewer
 from .focused_interviewer_persona import focused_interviewer
@@ -35,61 +36,10 @@ from .focused_interviewer_persona import focused_interviewer
 logger = logging.getLogger(__name__)
 
 # Model configurations
-_WHISPER_MODEL = "large-v3"  # For high-accuracy bilingual STT
-_SENTENCE_BERT_MODEL = "all-MiniLM-L6-v2"  # For centroid scoring
-_KEYBERT_MODEL = "all-MiniLM-L6-v2"  # For deep term detection
-_VAD_MODEL = "silero_vad"  # For voice activity detection
-
-
-class InterviewMode(Enum):
-    TECHNICAL = "technical"
-    HR = "hr"
-
-
-@dataclass
-class InterviewContext:
-    """Context loaded from screening phase for personalized interviews"""
-    candidate_id: str
-    application_id: int
-    match_percentage: float
-    hr_explanation_json: Dict[str, Any]
-    gaps: List[str]  # Identified skill gaps
-    strengths: List[str]  # Candidate strengths
-    screening_score: float
-
-
-@dataclass
-class QuestionResponse:
-    """Structure for interview Q&A pairs"""
-    question_id: str
-    question_text: str
-    question_type: str  # "gap_probe", "technical_deep", "hr_star"
-    audio_url: Optional[str]
-    response_text: str
-    response_audio_url: Optional[str]
-    timestamp: datetime
-    
-    # Evaluation metrics
-    centroid_score: float  # Semantic similarity to ideal answer
-    depth_boost: float    # Expert terminology bonus
-    llm_qualitative_score: float  # GPT-4o-mini evaluation
-    confidence_score: float  # Combined confidence
-
-
-@dataclass
-class InterviewSession:
-    """Complete interview session data"""
-    session_id: str
-    candidate_id: str
-    application_id: int
-    mode: InterviewMode
-    context: InterviewContext
-    questions_asked: List[QuestionResponse]
-    final_score: float
-    transcript: str
-    audio_recording_url: Optional[str]
-    started_at: datetime
-    completed_at: Optional[datetime]
+_WHISPER_MODEL = "large-v3"
+_SENTENCE_BERT_MODEL = "all-MiniLM-L6-v2"
+_KEYBERT_MODEL = "all-MiniLM-L6-v2"
+_VAD_MODEL = "silero_vad"
 
 
 class TechnicalInterviewAgent:

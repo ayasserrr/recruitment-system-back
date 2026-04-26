@@ -1,9 +1,26 @@
 """
 Public (no-auth) application endpoints.
 
-POST /api/v1/apply/{jobId}                  — submit a job application with CV upload
-GET  /api/v1/candidates/my-applications     — candidate's own applications, lookup by email
-GET  /api/v1/public/jobs/{jobId}            — public job detail for the apply page
+POST /api/v1/apply/{jobId}              — submit a job application with CV upload
+GET  /api/v1/candidates/my-applications — candidate's own applications (lookup by email)
+GET  /api/v1/public/jobs/{jobId}        — public job detail for the apply page
+
+UPLOAD PIPELINE (POST /api/v1/apply)
+─────────────────────────────────────
+1. Validate job, posting, file extension.
+2. Find-or-create Candidate row (flush, not commit).
+3. Reject duplicate applications.
+4. Save file to uploads/cvs/<candidate_id>/.
+5. fitz_extract_text()  — local PyMuPDF extraction; fail fast if empty/unreadable.
+6. parse_with_llm()     — GPT-4o-mini structures the fitz text into ParsedCV.
+7. Create CandidateCV with extracted_text = raw fitz output (persisted immediately).
+8. CVPersistenceService.persist_cv_sub_tables() — writes skills, experiences,
+   educations, projects in the SAME transaction.
+9. Update Candidate profile fields from ParsedCV.
+10. Create Application row.
+11. Single db.commit() — everything lands atomically.
+
+Log: [FLOW-SYNC] CV {cv_id} parsed locally via fitz and persisted.
 """
 from __future__ import annotations
 
@@ -23,6 +40,8 @@ from models.db.candidate_cv import CandidateCV
 from models.db.job_posting import JobPosting
 from models.db.job_requisition import JobRequisition
 from models.schemas.frontend_schemas import ApplyResponse, CandidateApplicationItem
+from services.cv_persistence_service import CVPersistenceService
+from services.cv_service import extract_cv_info
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +57,7 @@ _ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
 
 @router.get("/api/v1/public/jobs/{job_id}", summary="Public job detail for apply page")
 def public_job_detail(job_id: int, db: Session = Depends(get_db)):
+    from datetime import date as _date
     jr: Optional[JobRequisition] = (
         db.query(JobRequisition)
         .filter(JobRequisition.requisition_id == job_id)
@@ -46,7 +66,19 @@ def public_job_detail(job_id: int, db: Session = Depends(get_db)):
     if not jr:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
 
-    company_name = jr.company.name if jr.company else "Our Company"
+    try:
+        company_name = jr.company.name if jr.company else "Our Company"
+    except Exception:
+        company_name = "Our Company"
+
+    end_date_passed = bool(
+        jr.cv_collection_end_date and jr.cv_collection_end_date < _date.today()
+    )
+    is_open = (
+        jr.status not in ("ranking_complete", "Closed")
+        and not end_date_passed
+    )
+
     return {
         "id": jr.requisition_id,
         "jobTitle": jr.job_title,
@@ -68,7 +100,7 @@ def public_job_detail(job_id: int, db: Session = Depends(get_db)):
         "postingStartDate": jr.posting_start_date.isoformat() if jr.posting_start_date else None,
         "postingEndDate": jr.cv_collection_end_date.isoformat() if jr.cv_collection_end_date else None,
         "company": company_name,
-        "isOpen": jr.status not in ("ranking_complete", "Closed"),
+        "isOpen": is_open,
     }
 
 
@@ -89,7 +121,7 @@ async def apply_for_job(
     coverLetter: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
-    # ── Validate job ───────────────────────────────────────────────────────────
+    # ── 1. Validate job ─────────────────────────────────────────────────────────
     jr: Optional[JobRequisition] = (
         db.query(JobRequisition)
         .filter(JobRequisition.requisition_id == job_id)
@@ -109,7 +141,7 @@ async def apply_for_job(
             detail="This job is not currently accepting applications.",
         )
 
-    # ── Validate file extension ────────────────────────────────────────────────
+    # ── 2. Validate file extension ──────────────────────────────────────────────
     ext = os.path.splitext(cvFile.filename or "")[1].lower()
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -117,29 +149,29 @@ async def apply_for_job(
             detail="CV must be a PDF, DOC, or DOCX file.",
         )
 
-    # ── Find or create candidate ───────────────────────────────────────────────
+    # ── 3. Find or create Candidate ─────────────────────────────────────────────
     name_parts = fullName.strip().split(" ", 1)
     first_name = name_parts[0]
     last_name = name_parts[1] if len(name_parts) > 1 else ""
+    clean_email = email.lower().strip()
 
     candidate: Optional[Candidate] = (
-        db.query(Candidate).filter(Candidate.email == email.lower().strip()).first()
+        db.query(Candidate).filter(Candidate.email == clean_email).first()
     )
     if not candidate:
         candidate = Candidate(
             first_name=first_name,
             last_name=last_name,
-            email=email.lower().strip(),
+            email=clean_email,
             phone=phone,
         )
         db.add(candidate)
         db.flush()
     else:
-        # Update phone if missing
         if not candidate.phone and phone:
             candidate.phone = phone
 
-    # ── Check for duplicate application ───────────────────────────────────────
+    # ── 4. Reject duplicate applications ───────────────────────────────────────
     existing_app: Optional[Application] = (
         db.query(Application)
         .filter(
@@ -154,7 +186,7 @@ async def apply_for_job(
             detail="You have already applied for this position.",
         )
 
-    # ── Save CV file ───────────────────────────────────────────────────────────
+    # ── 5. Save file to disk ────────────────────────────────────────────────────
     candidate_dir = os.path.join(_UPLOAD_DIR, str(candidate.candidate_id))
     os.makedirs(candidate_dir, exist_ok=True)
     unique_name = f"{uuid.uuid4().hex}{ext}"
@@ -163,17 +195,80 @@ async def apply_for_job(
     with open(file_path, "wb") as f:
         shutil.copyfileobj(cvFile.file, f)
 
-    # ── Create CandidateCV record ──────────────────────────────────────────────
+    # ── 6 & 7. fitz extraction + LLM structuring (must happen before DB writes) ─
+    raw_text: str = ""
+    parsed_cv = None
+    cv_parse_error: Optional[str] = None
+
+    try:
+        raw_text, parsed_cv = extract_cv_info(
+            file_path=file_path,
+            ext=ext,
+            cv_id=None,           # cv_id not yet assigned
+            candidate_email_hint=clean_email,
+        )
+    except ValueError as ve:
+        # File is empty / unreadable — reject the application immediately
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(ve),
+        )
+    except Exception as exc:
+        # Non-fatal: log and continue without parsed data
+        cv_parse_error = str(exc)
+        logger.warning(
+            "[apply] Non-fatal CV parsing error for candidate=%d: %s",
+            candidate.candidate_id, exc,
+        )
+
+    # ── 8. Create CandidateCV (with extracted_text stored immediately) ──────────
     cv_record = CandidateCV(
         candidate_id=candidate.candidate_id,
         file_url=file_path,
         file_name=cvFile.filename or unique_name,
         is_primary=True,
+        extracted_text=raw_text or None,
     )
     db.add(cv_record)
-    db.flush()
+    db.flush()  # get cv_id before sub-table writes
 
-    # ── Create Application ─────────────────────────────────────────────────────
+    # ── 9. Persist sub-tables via CVPersistenceService ──────────────────────────
+    if parsed_cv is not None:
+        try:
+            svc = CVPersistenceService()
+            svc.persist_cv_sub_tables(parsed_cv, db, cv_record.cv_id)
+
+            # Update Candidate profile (only overwrite empty fields)
+            if parsed_cv.professional_summary and not candidate.professional_summary:
+                candidate.professional_summary = parsed_cv.professional_summary
+            if parsed_cv.years_of_experience and not candidate.years_of_experience:
+                candidate.years_of_experience = parsed_cv.years_of_experience
+            if parsed_cv.education_level and not candidate.education_level:
+                candidate.education_level = parsed_cv.education_level
+            if parsed_cv.field_of_study and not candidate.field_of_study:
+                candidate.field_of_study = parsed_cv.field_of_study
+
+            logger.info(
+                "[FLOW-SYNC] CV %d parsed locally via fitz and persisted. "
+                "candidate=%d  skills=%d  experiences=%d  projects=%d",
+                cv_record.cv_id,
+                candidate.candidate_id,
+                len(parsed_cv.skills),
+                len(parsed_cv.experiences),
+                len(parsed_cv.projects),
+            )
+        except Exception as persist_exc:
+            # Sub-table persistence failure is non-fatal; ranking has raw_text fallback
+            logger.warning(
+                "[apply] Sub-table persistence error for cv_id=%d: %s",
+                cv_record.cv_id, persist_exc,
+            )
+
+    # ── 10. Create Application ──────────────────────────────────────────────────
     application = Application(
         posting_id=posting.posting_id,
         candidate_id=candidate.candidate_id,
@@ -183,16 +278,17 @@ async def apply_for_job(
         current_pipeline_stage="Applied",
     )
     db.add(application)
-
-    # Update total_applications counter on posting
     posting.total_applications = (posting.total_applications or 0) + 1
 
+    # ── 11. Single atomic commit ────────────────────────────────────────────────
     db.commit()
 
     logger.info(
-        "[apply] New application: candidate=%d posting=%d",
+        "[apply] Application submitted: candidate=%d posting=%d cv=%d parse_error=%s",
         candidate.candidate_id,
         posting.posting_id,
+        cv_record.cv_id,
+        cv_parse_error or "none",
     )
 
     return ApplyResponse(

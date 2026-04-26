@@ -1,5 +1,6 @@
 import re
 from sqlalchemy.orm import Session
+from core.status_constants import JRStatus
 from models.schemas.job_schema import _sanitize_skill_list
 from agents.runner import trigger_pipeline
 
@@ -78,11 +79,15 @@ def update_requisition_status(
     new_status: str,
     db: Session,
 ) -> JobRequisition:
-    """
-    Update the status of a requisition — only if owned by the recruiter.
+    """Update the status of a requisition — only if owned by the recruiter.
+
+    Status strings are normalized via JRStatus.normalize() so that frontend
+    values like "Published", "active", "Live" all map to their canonical form
+    before being written to the DB, keeping the Celery Beat scanners aligned.
     """
     requisition = get_requisition_for_recruiter(requisition_id, recruiter_id, db)
-    requisition.status = new_status
+    canonical = JRStatus.normalize(new_status)
+    requisition.status = canonical
     db.commit()
     db.refresh(requisition)
     return requisition

@@ -73,14 +73,10 @@ def _build_job_item(jr: JobRequisition, db: Session) -> JobListItem:
     elif jr.posting_start_date:
         posted_date = jr.posting_start_date.isoformat()
 
-    # ── Auto-close on read ─────────────────────────────────────────────────────
-    end_date_passed = False
-    if jr.cv_collection_end_date:
-        end_date_passed = jr.cv_collection_end_date < date.today()
-        if end_date_passed and jr.status not in ("ranking_complete", "Closed"):
-            jr.status = "Closed"
-            db.add(jr)
-            db.commit()
+    # ── Auto-close display flag (read-only — never writes to DB) ──────────────
+    end_date_passed = bool(
+        jr.cv_collection_end_date and jr.cv_collection_end_date < date.today()
+    )
 
     # ── Pipeline counts ────────────────────────────────────────────────────────
     cvs = 0
@@ -250,6 +246,26 @@ def get_job_detail(
 
 # ── PATCH /api/v1/jobs/{id} ────────────────────────────────────────────────────
 
+_STATUS_CANONICAL: dict[str, str] = {
+    # Normalise common frontend capitalization variants to the exact strings
+    # expected by the Celery Beat scanners and state-machine guards.
+    "active":           "Active",
+    "published":        "published",
+    "draft":            "Draft",
+    "closed":           "Closed",
+    "ranked":           "ranked",
+    "assessment_sent":  "assessment_sent",
+    "assessment_ranked": "assessment_ranked",
+    "interview_pending": "interview_pending",
+    "ranking_complete": "ranking_complete",
+    # Common frontend typos / alternate forms
+    "open":             "Active",
+    "live":             "Active",
+    "publish":          "published",
+    "close":            "Closed",
+}
+
+
 @router.patch("/{job_id}", summary="Update job status")
 def update_job_status(
     job_id: int,
@@ -258,9 +274,13 @@ def update_job_status(
     db: Session = Depends(get_db),
 ):
     jr = _require_jr(job_id, ctx["company_id"], db)
-    jr.status = body.status
+    # Normalise status so "Published", "ACTIVE", "active" all resolve to the
+    # canonical form checked by the Celery Beat scanners.
+    canonical = _STATUS_CANONICAL.get(body.status.lower().strip(), body.status.strip())
+    jr.status = canonical
     jr.updated_at = datetime.utcnow()
     db.commit()
+    logger.info("[dashboard] JR %d status → '%s' (requested: '%s')", job_id, canonical, body.status)
     return {"id": job_id, "status": jr.status, "message": "Status updated."}
 
 

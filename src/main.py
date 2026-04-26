@@ -81,6 +81,8 @@ def startup():
 # Include routers
 app.include_router(auth_router)
 app.include_router(recruiter_auth_router)
+from routes.recruiter_auth import recruiter_alias_router
+app.include_router(recruiter_alias_router)
 app.include_router(linkedin_auth_router)
 app.include_router(base_router)
 app.include_router(data_router)

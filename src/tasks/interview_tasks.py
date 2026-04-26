@@ -171,7 +171,12 @@ def send_interview_invitations(self, requisition_id: int) -> dict:
                 scheduled_at=deadline_dt,
             )
             db.add(session_row)
-            recipients.append((entry.application_id, candidate.email, candidate.first_name or "Candidate"))
+            recipients.append((
+                entry.application_id,
+                candidate.candidate_id,
+                candidate.email,
+                candidate.first_name or "Candidate",
+            ))
 
         db.commit()
         logger.info(
@@ -188,8 +193,13 @@ def send_interview_invitations(self, requisition_id: int) -> dict:
     sent, failed = 0, 0
     for batch_start in range(0, len(recipients), _BATCH_SIZE):
         batch = recipients[batch_start: batch_start + _BATCH_SIZE]
-        for app_id, email, first_name in batch:
-            interview_url = f"{base_url}/interview?application_id={app_id}"
+        for app_id, candidate_id, email, first_name in batch:
+            # Include requisition_id + candidate_id so the frontend can call
+            # POST /api/interview/start directly without an extra lookup.
+            interview_url = (
+                f"{base_url}/interview"
+                f"?requisition_id={requisition_id}&candidate_id={candidate_id}"
+            )
             success = send_interview_invitation_sync(
                 recipient_email=email,
                 first_name=first_name,

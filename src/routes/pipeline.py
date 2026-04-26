@@ -75,14 +75,10 @@ def get_pipeline(
         .all()
     ]
 
-    # ── Auto-close on read ─────────────────────────────────────────────────────
-    end_date_passed = False
-    if jr.cv_collection_end_date:
-        end_date_passed = jr.cv_collection_end_date < date.today()
-        if end_date_passed and jr.status not in ("ranking_complete", "Closed"):
-            jr.status = "Closed"
-            db.add(jr)
-            db.commit()
+    # ── Auto-close display flag (read-only — never writes to DB) ──────────────
+    end_date_passed = bool(
+        jr.cv_collection_end_date and jr.cv_collection_end_date < date.today()
+    )
 
     # ── CV counts ──────────────────────────────────────────────────────────────
     cv_count = 0

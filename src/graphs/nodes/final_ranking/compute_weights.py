@@ -13,17 +13,24 @@ from database.connection import SessionLocal
 from graphs.states.final_ranking_state import FinalRankingState
 from models.db.application import Application
 from models.db.assessment_leaderboard import AssessmentLeaderboard
+from models.db.hr_interview_session import HRInterviewSession
 from models.db.technical_interview_session import TechnicalInterviewSession
 
 logger = logging.getLogger(__name__)
 
+# Default weights — redistribute proportionally when a component is absent.
+# CV: 60% | Assessment: 25% | Interview (tech + HR blended): 15%
 _WEIGHT_CV = 0.60
 _WEIGHT_ASSESSMENT = 0.25
 _WEIGHT_INTERVIEW = 0.15
 
 
 def compute_weights_node(state: FinalRankingState) -> FinalRankingState:
-    """Probe the pool for available score components and normalise weights."""
+    """Probe the pool for available score components and normalise weights.
+
+    has_interview = True when at least one Completed session exists in either
+    TechnicalInterviewSession OR HRInterviewSession for the posting.
+    """
     if state.get("error"):
         return state
 
@@ -38,7 +45,7 @@ def compute_weights_node(state: FinalRankingState) -> FinalRankingState:
             .first()
         ) is not None
 
-        has_interview = (
+        has_tech_interview = (
             db.query(TechnicalInterviewSession)
             .join(
                 Application,
@@ -52,12 +59,29 @@ def compute_weights_node(state: FinalRankingState) -> FinalRankingState:
             .first()
         ) is not None
 
+        has_hr_interview = (
+            db.query(HRInterviewSession)
+            .join(
+                Application,
+                HRInterviewSession.application_id == Application.application_id,
+            )
+            .filter(
+                Application.posting_id == posting_id,
+                HRInterviewSession.status == "Completed",
+                HRInterviewSession.overall_score.isnot(None),
+            )
+            .first()
+        ) is not None
+
+        # The interview weight activates when EITHER type of interview is present
+        has_interview = has_tech_interview or has_hr_interview
+
         w_cv = _WEIGHT_CV
         w_assessment = _WEIGHT_ASSESSMENT if has_assessment else 0.0
         w_interview = _WEIGHT_INTERVIEW if has_interview else 0.0
         total_w = w_cv + w_assessment + w_interview
         if total_w == 0.0:
-            total_w = 1.0  # safeguard against misconfiguration — should never happen
+            total_w = 1.0
 
         weights = {
             "cv": round(w_cv / total_w, 4),
@@ -67,10 +91,10 @@ def compute_weights_node(state: FinalRankingState) -> FinalRankingState:
 
         logger.info(
             "[final_ranking:weights] JR %d — CV=%.2f  Assessment=%.2f  Interview=%.2f "
-            "(has_assessment=%s has_interview=%s)",
+            "(has_assessment=%s has_tech=%s has_hr=%s)",
             requisition_id,
             weights["cv"], weights["assessment"], weights["interview"],
-            has_assessment, has_interview,
+            has_assessment, has_tech_interview, has_hr_interview,
         )
         return {
             **state,

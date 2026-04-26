@@ -260,7 +260,7 @@ def _get_or_create_interview_config(requisition_id: int, db: Session) -> Technic
 
 async def _create_livekit_room(room_name: str, metadata: dict) -> None:
     """
-    Create a LiveKit room on the server and embed metadata.
+    Create a LiveKit room on the server and embed metadata, then dispatch the AI agent.
     Metadata is read by the Voice Agent on room entry to personalise the interview.
     Skips creation gracefully if the LiveKit server is unreachable.
     """
@@ -282,11 +282,27 @@ async def _create_livekit_room(room_name: str, metadata: dict) -> None:
                 CreateRoomRequest(
                     name=room_name,
                     metadata=json.dumps(metadata, ensure_ascii=False),
-                    empty_timeout=300,   # close room 5 min after last participant leaves
+                    empty_timeout=300,
                     max_participants=10,
                 )
             )
-        logger.info("[livekit] Room '%s' created with metadata.", room_name)
+            logger.info("[livekit] Room '%s' created with metadata.", room_name)
+
+            # Dispatch the AI agent into the room so the candidate hears it on join.
+            # Requires the agent worker to be running and connected to the same LiveKit project.
+            try:
+                from livekit.api import CreateAgentDispatchRequest  # type: ignore
+                await lk.agent_dispatch.create_dispatch(
+                    CreateAgentDispatchRequest(
+                        agent_name=cfg.LIVEKIT_AGENT_NAME,
+                        room=room_name,
+                        metadata=json.dumps(metadata, ensure_ascii=False),
+                    )
+                )
+                logger.info("[livekit] Agent '%s' dispatched to room '%s'.", cfg.LIVEKIT_AGENT_NAME, room_name)
+            except Exception as dispatch_exc:
+                logger.warning("[livekit] Agent dispatch failed (agent may auto-join instead): %s", dispatch_exc)
+
     except Exception as exc:
         logger.warning("[livekit] Room creation failed (will still return token): %s", exc)
 

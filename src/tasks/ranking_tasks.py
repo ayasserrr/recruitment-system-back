@@ -40,6 +40,7 @@ from datetime import date
 
 from core.celery import celery_app
 from core.pipeline_lock import acquire_jr_lock, release_jr_lock
+from core.status_constants import JRStatus, ProcessingStatus
 from database.connection import SessionLocal
 from graphs.runners.cv_ranking_runner import run_cv_ranking
 from models.db.application import Application
@@ -51,10 +52,8 @@ from services.email_service import send_shortlist_notification_sync
 
 logger = logging.getLogger(__name__)
 
-# 'failed' removed intentionally — a failed LinkedIn publish should NOT
-# re-trigger infinite ranking loops.  Operators must reset status manually.
-_RANKABLE_STATUSES = {"published", "Active"}
-_RANKED_STATUS = "ranked"
+_RANKABLE_STATUSES = JRStatus.RANKABLE   # {"published", "Active"}
+_RANKED_STATUS     = JRStatus.RANKED     # "ranked"
 
 
 # ── Beat task: deadline scanner ───────────────────────────────────────────────
@@ -143,6 +142,36 @@ def process_cv_ranking(self, requisition_id: int) -> dict:
             requisition_id,
         )
         return {"requisition_id": requisition_id, "skipped": True, "reason": "already_processing"}
+
+    # ANTI-LOOP: secondary guard — abort if the JR is already ranked.
+    # This handles the race where the Beat scanner dispatches a task in the
+    # brief window between ranking completing and the status update propagating.
+    _check_db = SessionLocal()
+    try:
+        _jr = (
+            _check_db.query(JobRequisition)
+            .filter(JobRequisition.requisition_id == requisition_id)
+            .first()
+        )
+        if _jr and _jr.status == _RANKED_STATUS:
+            release_jr_lock(requisition_id)
+            logger.info(
+                "[ranking_worker] JR %d is already status='ranked' — aborting.",
+                requisition_id,
+            )
+            return {
+                "requisition_id": requisition_id,
+                "skipped": True,
+                "reason": "already_ranked",
+            }
+    except Exception:
+        logger.warning(
+            "[ranking_worker] Status pre-check query failed for JR %d — continuing.",
+            requisition_id,
+            exc_info=True,
+        )
+    finally:
+        _check_db.close()
 
     result = {}
     try:

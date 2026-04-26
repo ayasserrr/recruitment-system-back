@@ -169,3 +169,76 @@ class CVPersistenceService:
             )
 
         return candidate.candidate_id, cv_id
+
+    # ── Public helper: write sub-tables only ────────────────────────────────────
+
+    def persist_cv_sub_tables(
+        self,
+        cv_parsed: ParsedCV,
+        db: Session,
+        cv_id: int,
+    ) -> None:
+        """
+        Write CVExperience, CVProject, CVSkill, CVEducation rows for an
+        EXISTING CandidateCV row (identified by cv_id).
+
+        Does NOT create a Candidate or CandidateCV — those must already exist.
+        Does NOT call db.commit() so the caller can combine this with other
+        writes in a single transaction.
+
+        Called by apply.py immediately after saving the uploaded file so that
+        the ranking engine has structured data before the deadline scanner fires.
+        """
+        # ── CVExperience ────────────────────────────────────────────────
+        for exp in cv_parsed.experiences:
+            description: Optional[str] = None
+            if exp.responsibilities:
+                description = "\n".join(str(r) for r in exp.responsibilities if r) or None
+            db.add(
+                CVExperience(
+                    cv_id=cv_id,
+                    company_name=exp.company,
+                    job_title=exp.job_title,
+                    start_date=self._parse_date(exp.start_date),
+                    end_date=self._parse_date(exp.end_date),
+                    description=description,
+                )
+            )
+
+        # ── CVProject ───────────────────────────────────────────────────
+        for proj in cv_parsed.projects:
+            tech_stack: Optional[str] = None
+            if proj.tech_stack:
+                tech_stack = ", ".join(str(t) for t in proj.tech_stack)
+            db.add(
+                CVProject(
+                    cv_id=cv_id,
+                    project_name=proj.project_name,
+                    description=proj.description,
+                    tech_stack=tech_stack,
+                )
+            )
+
+        # ── CVSkill ─────────────────────────────────────────────────────
+        for skill in cv_parsed.skills:
+            db.add(
+                CVSkill(
+                    cv_id=cv_id,
+                    skill_name=skill.skill_name,
+                    proficiency_level=skill.proficiency_level,
+                )
+            )
+
+        # ── CVEducation ─────────────────────────────────────────────────
+        for edu in cv_parsed.educations:
+            db.add(
+                CVEducation(
+                    cv_id=cv_id,
+                    institution=edu.institution,
+                    degree=edu.degree,
+                    field=edu.field,
+                    graduation_date=self._parse_date(edu.graduation_date),
+                )
+            )
+
+        db.flush()

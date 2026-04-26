@@ -201,6 +201,10 @@ def _load_concepts_and_gaps(
     concepts_out: list[dict] = []
     matched_skills: set[str] = set()
 
+    def _normalize_for_match(s: str) -> str:
+        """Lowercase, strip whitespace, remove hyphens and underscores for fuzzy comparison."""
+        return s.lower().strip().replace("-", "").replace("_", "").replace(" ", "")
+
     try:
         with KnowledgeSession(knowledge_engine) as ks:
             all_tools: list[Tool] = ks.exec(select(Tool)).all()
@@ -209,17 +213,37 @@ def _load_concepts_and_gaps(
             for skill in skill_names:
                 skill_lower = skill.lower().strip()
                 skill_slug = skill_lower.replace(" ", "-")
+                skill_normalized = _normalize_for_match(skill)
+
                 for tool in all_tools:
                     if tool.id in matched_tool_ids:
                         continue
+
+                    tool_name_lower = tool.name.lower().strip()
+                    tool_slug_lower = tool.slug.lower().strip()
+                    tool_name_normalized = _normalize_for_match(tool.name)
+                    tool_slug_normalized = _normalize_for_match(tool.slug)
+
                     if (
-                        tool.name.lower() == skill_lower
-                        or tool.slug.lower() == skill_slug
-                        or skill_lower in tool.name.lower()
-                        or tool.name.lower() in skill_lower
+                        # Exact matches (original logic)
+                        tool_name_lower == skill_lower
+                        or tool_slug_lower == skill_slug
+                        # Substring matches (original logic)
+                        or skill_lower in tool_name_lower
+                        or tool_name_lower in skill_lower
+                        # NEW: normalized comparison — "Fast API" == "fastapi", "fast-api" == "fastapi"
+                        or tool_name_normalized == skill_normalized
+                        or tool_slug_normalized == skill_normalized
+                        # NEW: normalized substring — "fastapi" in "fast_api_framework"
+                        or (len(skill_normalized) >= 4 and skill_normalized in tool_name_normalized)
+                        or (len(tool_name_normalized) >= 4 and tool_name_normalized in skill_normalized)
                     ):
                         matched_tool_ids.add(tool.id)
                         matched_skills.add(skill)
+                        logger.info(
+                            "[knowledge_db] Matched skill '%s' → tool '%s' (id=%d)",
+                            skill, tool.name, tool.id,
+                        )
                         break
 
             unmatched_skills = [s for s in skill_names if s not in matched_skills]
@@ -725,6 +749,13 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
         _mark_jr_generated(db, req_id)
         db.commit()
 
+        # Smart Fill: save LLM-generated concepts for unknown skills back to
+        # knowledge_db so the NEXT assessment can hit local DB instead of the LLM.
+        # This runs AFTER the main commit so knowledge_db failures never block
+        # the assessment pipeline.
+        if unmatched_skills and final_questions:
+            _save_skills_to_knowledge_db(unmatched_skills, final_questions)
+
         logger.info(
             "[assessment_gen] Saved %d/%d questions for requisition %d (template %d). "
             "External knowledge questions: %d skill(s).",
@@ -738,6 +769,120 @@ def generate_questions_node(state: AssessmentState) -> AssessmentState:
         return {**state, "error": f"Question generation failed: {exc}"}
     finally:
         db.close()
+
+
+def _save_skills_to_knowledge_db(
+    unmatched_skills: list[str],
+    generated_questions: list[dict],
+) -> None:
+    """
+    Smart Fill: persist LLM-generated concepts for unknown skills back into
+    the knowledge_db so future assessments can hit the local DB instead of
+    calling the LLM again.
+
+    For each unmatched skill:
+      1. Find or create a Tool row (name=skill, slug=normalised).
+      2. For each question that tested this skill, create a Concept row with
+         the question text stored in `notes` for reuse.
+
+    Log: [KNOWLEDGE-HIT] Skill '{skill}' saved to local DB for future reuse.
+
+    Runs in its own KnowledgeSession and is non-fatal (logs errors, never raises).
+    """
+    if not unmatched_skills or not generated_questions:
+        return
+
+    try:
+        with KnowledgeSession(knowledge_engine) as ks:
+            # Determine a default category_id — use the first available category
+            from sqlmodel import select as _select
+            from knowledge_db.models import Category as _Category
+            default_category = ks.exec(_select(_Category)).first()
+            if not default_category:
+                logger.warning(
+                    "[knowledge_db] No categories in knowledge_db — cannot auto-save skills."
+                )
+                return
+            cat_id = default_category.id
+
+            for skill in unmatched_skills:
+                skill_lower = skill.lower().strip()
+                slug = skill_lower.replace(" ", "-").replace("_", "-")
+
+                # Find existing tool by normalized name or slug
+                existing = ks.exec(
+                    select(Tool).where(
+                        (Tool.slug == slug) | (Tool.name.ilike(skill_lower))
+                    )
+                ).first()
+
+                if existing:
+                    tool = existing
+                    logger.info(
+                        "[KNOWLEDGE-HIT] Skill '%s' already in local DB (tool_id=%d) "
+                        "— enriching with new concepts.",
+                        skill, tool.id,
+                    )
+                else:
+                    tool = Tool(
+                        name=skill,
+                        slug=slug,
+                        description=(
+                            f"Auto-added from LLM generation — "
+                            f"verify accuracy and enrich before relying on this entry."
+                        ),
+                        category_id=cat_id,
+                    )
+                    ks.add(tool)
+                    ks.flush()
+                    logger.info(
+                        "[KNOWLEDGE-HIT] Skill '%s' saved to local DB as new Tool "
+                        "(tool_id=%d) for future reuse.",
+                        skill, tool.id,
+                    )
+
+                # Add concepts for questions that tested this skill
+                skill_questions = [
+                    q for q in generated_questions
+                    if (q.get("tool_name") or "").lower().strip() == skill_lower
+                ]
+
+                added = 0
+                for q in skill_questions[:5]:  # cap at 5 concepts per skill
+                    concept_name = str(q.get("concept_name") or f"{skill} concept")
+                    # Remove the '[External Knowledge]' suffix if present
+                    concept_name = concept_name.replace(" [External Knowledge]", "").strip()
+
+                    # Skip if a concept with this name already exists for this tool
+                    existing_concept = ks.exec(
+                        select(Concept).where(
+                            Concept.tool_id == tool.id,
+                            Concept.name.ilike(concept_name),
+                        )
+                    ).first()
+                    if existing_concept:
+                        continue
+
+                    ks.add(Concept(
+                        tool_id=tool.id,
+                        level=ConceptLevel.mid,
+                        name=concept_name[:200],
+                        notes=str(q.get("question_text") or "")[:500],
+                    ))
+                    added += 1
+
+                if added:
+                    logger.info(
+                        "[KNOWLEDGE-HIT] Added %d concept(s) for skill '%s' to local DB.",
+                        added, skill,
+                    )
+
+            ks.commit()
+
+    except Exception as exc:
+        logger.warning(
+            "[knowledge_db] Auto-save of LLM-generated skills failed (non-fatal): %s", exc
+        )
 
 
 def _mark_jr_generated(db, req_id: int) -> None:

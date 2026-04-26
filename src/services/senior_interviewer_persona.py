@@ -16,13 +16,13 @@ from enum import Enum
 import numpy as np
 from sqlalchemy.orm import Session
 
-from ..models.db.semantic_analysis_report import SemanticAnalysisReport
-from ..models.db.application import Application
-from ..models.db.candidate import Candidate
-from ..models.db.cv_project import CVProject
-from ..models.db.cv_experience import CVExperience
-from ..database import SessionLocal
-from ..services.technical_interview_agent import InterviewSession, QuestionResponse, InterviewMode
+from models.db.semantic_analysis_report import SemanticAnalysisReport
+from models.db.application import Application
+from models.db.candidate import Candidate
+from models.db.cv_project import CVProject
+from models.db.cv_experience import CVExperience
+from database.connection import SessionLocal
+from services.interview_types import InterviewSession, QuestionResponse, InterviewMode
 
 logger = logging.getLogger(__name__)
 

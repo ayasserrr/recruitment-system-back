@@ -1728,7 +1728,38 @@ def context_gatherer_node(state: RankingState) -> RankingState:
                         for p in (cv.projects if cv else [])
                     ],
                 }
-                record["raw_text"] = _build_raw_text(record)
+                # ── raw_text: prefer fitz-extracted text stored at upload time ──
+                # If extracted_text is present in candidate_cvs (set by apply.py
+                # via cv_service.fitz_extract_text), use it directly — it's the
+                # authoritative full-text the scoring functions need.
+                # Fall back to building from sub-tables only when the CV was
+                # uploaded before this feature was added.
+                if cv and cv.extracted_text and len(cv.extracted_text.strip()) >= 80:
+                    record["raw_text"] = _normalize_text(cv.extracted_text)
+                    logger.info(
+                        "[context_gatherer] Scored via stored fitz extracted_text "
+                        "for cv_id=%d application_id=%d (%d chars).",
+                        cv.cv_id, app.application_id, len(cv.extracted_text),
+                    )
+                else:
+                    record["raw_text"] = _build_raw_text(record)
+                    if not record["raw_text"].strip():
+                        logger.error(
+                            "[context_gatherer] EMPTY raw_text for application_id=%d "
+                            "(cv_id=%s) — CV was not parsed at upload time. "
+                            "Ranking scores will be zero.",
+                            app.application_id,
+                            cv.cv_id if cv else "None",
+                        )
+                    else:
+                        logger.info(
+                            "[context_gatherer] Built raw_text from sub-tables for "
+                            "application_id=%d (cv_id=%s, %d chars).",
+                            app.application_id,
+                            cv.cv_id if cv else "None",
+                            len(record["raw_text"]),
+                        )
+
                 candidates_data.append(record)
 
             except Exception as exc:
@@ -2011,7 +2042,7 @@ def deterministic_scoring_node(state: RankingState) -> RankingState:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_llm_prompt(cand: dict, jd: dict) -> list[dict]:
-    """Construct the Groq chat messages for a single candidate assessment."""
+    """Construct the GPT-4o-mini prompt for a single candidate qualitative assessment."""
     total_yrs = cand["total_experience_months"] // 12
     total_mo = cand["total_experience_months"] % 12
     intern_mo = cand["internship_months"]
@@ -2038,38 +2069,63 @@ def _build_llm_prompt(cand: dict, jd: dict) -> list[dict]:
         exp_parts.append(f"• {title} @ {company}: {desc}")
     exp_text = "\n".join(exp_parts) or "No formal work experience."
 
-    skills_text = ", ".join(s["name"] for s in cand.get("skills", []))[:400] or "None listed"
+    candidate_skills_text = (
+        ", ".join(s["name"] for s in cand.get("skills", []))[:500]
+        or "None listed"
+    )
+
+    # Required skills from the JD — explicit list for direct comparison
+    required_skills_text = (
+        ", ".join(s["name"] for s in jd.get("required_skills", [])[:25])
+        or "Not specified"
+    )
+
+    # Professional summary (populated by cv_service at upload time)
+    professional_summary = (cand.get("professional_summary") or "").strip()[:500] or "Not provided."
+
+    # Responsibility text — prefer key_responsibilities, fall back to full description excerpt
+    responsibilities_text = (
+        (jd.get("key_responsibilities") or jd.get("full_description") or "")[:500]
+    ) or "Not specified."
 
     system_msg = (
-        "You are a senior AI/ML technical recruiter. "
-        "Evaluate candidates objectively for technical roles. "
+        "You are a senior technical recruiter evaluating candidates for AI/ML and software roles. "
+        "Base your evaluation STRICTLY on the data provided. "
+        "Never invent experience or skills not mentioned. "
         "ALWAYS respond with valid JSON only — no markdown, no prose."
     )
 
-    user_msg = f"""## Job Position
-Title: {jd.get("job_title")}
-Required Experience: {jd.get("required_years")} years | Seniority: {jd.get("seniority_level", "Not specified")}
-Responsibilities: {(jd.get("key_responsibilities") or "")[:400]}
-
-## Candidate: {cand.get("candidate_name")}
-Total Experience: {total_yrs}y {total_mo}m (internship: {intern_mo}mo)
-Education: {edu_text}
-Skills: {skills_text}
-
-## Projects
-{proj_text}
-
-## Work Experience
-{exp_text}
-
-Respond with VALID JSON (no markdown fences):
-{{
-  "project_depth_score": <integer 0-100>,
-  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
-  "concerns": ["<concern 1>", "<concern 2>"],
-  "interview_questions": ["<question 1>", "<question 2>", "<question 3>"],
-  "summary": "<2–3 sentence overall assessment>"
-}}"""
+    user_msg = (
+        f"## Job Position\n"
+        f"Title: {jd.get('job_title')}\n"
+        f"Required Experience: {jd.get('required_years')} years | "
+        f"Seniority: {jd.get('seniority_level', 'Not specified')}\n"
+        f"Required Skills: {required_skills_text}\n"
+        f"Responsibilities: {responsibilities_text}\n\n"
+        f"## Candidate: {cand.get('candidate_name')}\n"
+        f"Professional Summary: {professional_summary}\n"
+        f"Total Experience: {total_yrs}y {total_mo}m (internship: {intern_mo}mo)\n"
+        f"Education: {edu_text}\n"
+        f"Candidate Skills: {candidate_skills_text}\n\n"
+        f"## Projects\n"
+        f"{proj_text}\n\n"
+        f"## Work Experience\n"
+        f"{exp_text}\n\n"
+        f"## Scoring Instructions\n"
+        f"- project_depth_score: 0-100. Score based on EVIDENCE in the Projects and Work Experience "
+        f"sections above. If no projects are listed use 0. If projects show real deployment, "
+        f"complex architectures, or measurable impact score 60-90+.\n"
+        f"- Assess how well the candidate's skills ({candidate_skills_text}) cover "
+        f"the required skills ({required_skills_text}).\n\n"
+        f"Respond with VALID JSON (no markdown fences):\n"
+        f"{{\n"
+        f'  "project_depth_score": <integer 0-100>,\n'
+        f'  "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],\n'
+        f'  "concerns": ["<concern 1>", "<concern 2>"],\n'
+        f'  "interview_questions": ["<question 1>", "<question 2>", "<question 3>"],\n'
+        f'  "summary": "<2-3 sentence overall assessment based strictly on the data above>"\n'
+        f"}}"
+    )
 
     return [
         {"role": "system", "content": system_msg},
@@ -2779,12 +2835,32 @@ def persistence_node(state: RankingState) -> RankingState:
                     SemanticMatchedSkill.report_id == report.report_id
                 ).delete(synchronize_session=False)
 
+                # Write matched skills (exact / semantic / text evidence)
+                matched_skill_names: set[str] = set()
                 for matched in cand.get("matched_skills", []):
+                    skill_name = matched["skill"]
                     db.add(SemanticMatchedSkill(
                         report_id=report.report_id,
-                        skill_name=matched["skill"],
+                        skill_name=skill_name,
                         match_type=matched.get("match_type", "exact"),
                     ))
+                    matched_skill_names.add(skill_name.lower())
+
+                # Write MISSING skills (JD required skills absent from CV).
+                # These appear as match_type='missing' in semantic_matched_skills
+                # and are surfaced in GET /api/v1/requisitions/{jr_id}/semantic-analysis
+                # as the "missing_skills" list for each candidate.
+                jd_required = state.get("jd_data", {}).get("required_skills", [])
+                for jd_skill in jd_required:
+                    skill_name = jd_skill.get("name") or ""
+                    if not skill_name:
+                        continue
+                    if skill_name.lower() not in matched_skill_names:
+                        db.add(SemanticMatchedSkill(
+                            report_id=report.report_id,
+                            skill_name=skill_name,
+                            match_type="missing",
+                        ))
 
                 saved += 1
 

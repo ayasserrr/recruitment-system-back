@@ -20,6 +20,9 @@ from helpers.auth_helper import (
 )
 
 router = APIRouter(prefix="/api/v1/recruiters", tags=["recruiter-auth"])
+
+# Alias for backward compatibility
+recruiter_alias_router = APIRouter(prefix="/api/v1/recruiter", tags=["recruiter-auth"])
 security = HTTPBearer()
 
 
@@ -57,6 +60,7 @@ def recruiter_signup(data: RecruiterSignupRequest, db: Session = Depends(get_db)
 
 
 @router.post("/login", response_model=RecruiterAuthResponse)
+@recruiter_alias_router.post("/login", response_model=RecruiterAuthResponse)
 def recruiter_login(data: RecruiterLoginRequest, db: Session = Depends(get_db)):
     recruiter = db.query(Recruiter).filter(Recruiter.email == data.email).first()
 

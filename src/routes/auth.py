@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
 security = HTTPBearer()
 
 @router.post("/signup", response_model=AuthResponse)
+@router.post("/register", response_model=AuthResponse)
 async def signup(signup_request: SignupRequest, db: Session = Depends(get_db)):
     """
     Signup endpoint for new company accounts.

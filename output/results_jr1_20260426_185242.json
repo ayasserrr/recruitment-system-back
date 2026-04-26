@@ -1,0 +1,292 @@
+{
+  "jr_id": 1,
+  "generated_at": "2026-04-26T18:52:42.813778",
+  "leaderboard": [
+    {
+      "name": "Aya Yasser",
+      "candidate_id": 2,
+      "application_id": 2,
+      "assessment_id": 2,
+      "final_score": 0.0583,
+      "avg_depth": 0.0208,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "FastAPI",
+            "DELETE",
+            "decorator",
+            "route"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 0.25,
+          "matched_keywords": [
+            "validation"
+          ],
+          "missing_keywords": [
+            "Pydantic",
+            "serialization",
+            "request body"
+          ],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 0.25,
+          "comparative_score": 0.7,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "stop",
+            "container",
+            "command"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Prompt Templates": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "LangChain",
+            "PromptTemplate",
+            "dynamic variables",
+            "interpolation"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Dockerfile",
+            "CMD",
+            "ENTRYPOINT",
+            "container"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Output Parsers": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "LangChain",
+            "output parsers",
+            "exceptions",
+            "error handling"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Data Structures": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "set",
+            "unique items",
+            "data structure",
+            "membership testing"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "OOP Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "inheritance",
+            "method resolution",
+            "class hierarchy",
+            "polymorphism"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Functions & Scope": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "*args",
+            "**kwargs",
+            "variable-length",
+            "arguments"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "FastAPI | beginner": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "FastAPI",
+            "GET",
+            "path parameter",
+            "route",
+            "decorator"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "Docker | beginner": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "build",
+            "Dockerfile",
+            "-t",
+            "image"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "LangChain | beginner": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "LangChain",
+            "PromptTemplate",
+            "variable interpolation",
+            "template",
+            "format"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        }
+      }
+    }
+  ],
+  "keyword_gap_report": {
+    "Basic Routes (GET POST PUT DELETE)": [
+      "FastAPI",
+      "DELETE",
+      "decorator",
+      "route"
+    ],
+    "Request Body + Pydantic Models": [
+      "Pydantic",
+      "serialization",
+      "request body"
+    ],
+    "Images & Containers": [
+      "Docker",
+      "stop",
+      "container",
+      "command"
+    ],
+    "Prompt Templates": [
+      "LangChain",
+      "PromptTemplate",
+      "dynamic variables",
+      "interpolation"
+    ],
+    "Dockerfile Basics": [
+      "Dockerfile",
+      "CMD",
+      "ENTRYPOINT",
+      "container"
+    ],
+    "Output Parsers": [
+      "LangChain",
+      "output parsers",
+      "exceptions",
+      "error handling"
+    ],
+    "Data Structures": [
+      "set",
+      "unique items",
+      "data structure",
+      "membership testing"
+    ],
+    "OOP Basics": [
+      "inheritance",
+      "method resolution",
+      "class hierarchy",
+      "polymorphism"
+    ],
+    "Functions & Scope": [
+      "*args",
+      "**kwargs",
+      "variable-length",
+      "arguments"
+    ],
+    "FastAPI | beginner": [
+      "FastAPI",
+      "GET",
+      "path parameter",
+      "route",
+      "decorator"
+    ],
+    "Docker | beginner": [
+      "Docker",
+      "build",
+      "Dockerfile",
+      "-t",
+      "image"
+    ],
+    "LangChain | beginner": [
+      "LangChain",
+      "PromptTemplate",
+      "variable interpolation",
+      "template",
+      "format"
+    ]
+  }
+}
