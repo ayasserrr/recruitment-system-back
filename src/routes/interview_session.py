@@ -503,11 +503,25 @@ async def start_interview(
             ),
         )
 
-    # ── Idempotency: return existing token for active session ─────────────────
     room_name = f"int_app_{application.application_id}"
+
+    # ── Active: interview in progress — block re-entry ────────────────────────
+    # Once the candidate has joined and the agent is conducting the interview,
+    # re-entry is not allowed (same as submitting an assessment twice).
+    # The agent owns the lifecycle; it will close the room when done.
+    if existing_session and existing_session.status == _STATUS_ACTIVE:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Interview session {existing_session.session_id} is currently in progress. "
+                "It will close automatically when the AI interviewer finishes."
+            ),
+        )
+
+    # ── Scheduled: not yet started — re-generate token for same room ─────────
     if (
         existing_session
-        and existing_session.status in (_STATUS_SCHEDULED, _STATUS_ACTIVE)
+        and existing_session.status == _STATUS_SCHEDULED
         and existing_session.room_name == room_name
     ):
         token, expires_at = _generate_access_token(

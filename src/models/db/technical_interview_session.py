@@ -20,6 +20,8 @@ class TechnicalInterviewSession(Base):
     overall_performance = Column(String(100), nullable=True)
     summary = Column(Text, nullable=True)
     recommendation = Column(String(100), nullable=True)
+    # Full verbatim transcript of the voice interview, populated by livekit_agent.py
+    transcript = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     application = relationship("Application", back_populates="technical_interview_session")

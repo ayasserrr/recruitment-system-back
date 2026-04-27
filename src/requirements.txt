@@ -27,7 +27,8 @@ redis>=5.0.0
 
 # Technical Interview Agent dependencies
 livekit>=0.17.0
-livekit-api>=0.6.0
+livekit-api>=0.7.0                    # >=0.7 required for AgentDispatch support
+livekit-agents[openai,silero]>=0.11.0 # AI agent worker framework + plugins
 whisper>=1.1.10
 faster-whisper>=0.10.0
 sentence-transformers>=2.2.0

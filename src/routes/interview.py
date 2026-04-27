@@ -1,41 +1,38 @@
 """
 Interview Management Routes
-API endpoints for managing technical interviews with LiveKit integration
+API endpoints for managing technical interviews with LiveKit integration.
 """
 
-import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from ..database import get_db
-from ..services.technical_interview_agent import interview_agent, InterviewMode
-from ..models.db.application import Application
-from ..models.db.job_requisition import JobRequisition
-from ..models.db.semantic_analysis_report import SemanticAnalysisReport
+from database.connection import SessionLocal, get_db
+from helpers.config import get_settings
+from models.db.application import Application
+from models.db.candidate import Candidate
+from models.db.job_posting import JobPosting
+from models.db.job_requisition import JobRequisition
+from models.db.technical_interview_session import TechnicalInterviewSession
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
 
-class InterviewRequest(BaseModel):
-    """Request model for starting an interview"""
-    application_id: int = Field(..., description="Application ID to interview")
-    mode: str = Field(default="technical", description="Interview mode: 'technical' or 'hr'")
-    language: Optional[str] = Field(default="en", description="Preferred language: 'en', 'ar', or 'auto'")
-    persona: str = Field(default="focused", description="Interview persona: 'focused' (5-round), 'elite' (professional English), or 'bilingual' (Arabic/English)")
+# ── Request / Response models ─────────────────────────────────────────────────
+
+class InterviewStartRequest(BaseModel):
+    application_id: int = Field(..., description="Application ID whose session to activate")
 
 
-class InterviewResponse(BaseModel):
-    """Response model for interview initiation"""
-    session_id: str
+class InterviewStartResponse(BaseModel):
+    session_id: int                 # TechnicalInterviewSession PK
     livekit_room_name: str
     livekit_token: str
     status: str
@@ -43,306 +40,342 @@ class InterviewResponse(BaseModel):
 
 
 class InterviewStatus(BaseModel):
-    """Model for interview status updates"""
-    session_id: str
-    current_question: int
-    total_questions: int
-    confidence_score: float
-    technical_accuracy: float
+    session_id: int
     status: str
+    overall_score: float = 0.0      # never null — safe for React .toFixed()
+    summary: Optional[str] = None
 
 
 class CandidateScorecard(BaseModel):
-    """Model for final candidate scorecard"""
-    candidate_id: str
+    session_id: int
     application_id: int
-    session_id: str
-    scores: dict
-    recommendation: str
-    strengths: List[str]
-    identified_gaps: List[str]
-    interview_performance: dict
-    generated_at: str
+    candidate_name: str
+    overall_score: float
+    overall_performance: Optional[str]
+    recommendation: Optional[str]
+    summary: Optional[str]
+    transcript: Optional[str]
+    status: str
+    started_at: Optional[str]
+    ended_at: Optional[str]
 
 
-@router.post("/start", response_model=InterviewResponse)
+# ── POST /interviews/start ────────────────────────────────────────────────────
+
+@router.post("/start", response_model=InterviewStartResponse)
 async def start_interview(
-    request: InterviewRequest,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db)
+    request: InterviewStartRequest,
+    db: Session = Depends(get_db),
 ):
     """
-    Start a technical interview for a candidate
-    
-    - Validates application exists and has screening results
-    - Creates LiveKit room for voice communication
-    - Generates access token for candidate
-    - Starts interview process in background
+    Activate the interview session for a candidate:
+
+    1. Look up the existing TechnicalInterviewSession for this application.
+    2. Set overall_score=0.0 immediately (prevents React toFixed(NULL) crash).
+    3. Assign a room_name and mark status='Active'.
+    4. Generate a signed LiveKit participant token.
+    5. Create the LiveKit room with room metadata (used by the agent worker).
+    6. Dispatch the AI interview agent to that room.
+    7. Return the token so the frontend can join.
     """
-    try:
-        # Validate application exists
-        application = db.query(Application).filter(
-            Application.application_id == request.application_id
-        ).first()
-        
-        if not application:
-            raise HTTPException(status_code=404, detail="Application not found")
-        
-        # Check if screening results exist
-        report = db.query(SemanticAnalysisReport).filter(
-            SemanticAnalysisReport.application_id == request.application_id
-        ).first()
-        
-        if not report:
-            raise HTTPException(
-                status_code=400, 
-                detail="Screening results not found. Please complete CV screening first."
-            )
-        
-        # Check if interview already completed
-        if report.ai_insights and "interview_results" in report.ai_insights:
-            interview_data = json.loads(report.ai_insights)["interview_results"]
-            if interview_data.get("completed_at"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Interview already completed for this application"
-                )
-        
-        # Validate interview mode
-        try:
-            mode = InterviewMode(request.mode.lower())
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid interview mode. Must be 'technical' or 'hr'"
-            )
-        
-        # Generate LiveKit room and token
-        session_id = str(uuid.uuid4())
-        room_name = f"interview_{session_id}"
-        
-        # TODO: Generate actual LiveKit token
-        # For now, return mock token
-        livekit_token = f"mock_token_{session_id}"
-        
-        # Start interview in background
-        background_tasks.add_task(
-            conduct_interview_background,
-            request.application_id,
-            mode,
-            session_id,
-            room_name,
-            request.persona
+    settings = get_settings()
+
+    # ── 1. Validate application ───────────────────────────────────────────────
+    application: Optional[Application] = (
+        db.query(Application)
+        .filter(Application.application_id == request.application_id)
+        .first()
+    )
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    candidate: Candidate = application.candidate
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+
+    # ── 2. Find the existing TechnicalInterviewSession ────────────────────────
+    session_row: Optional[TechnicalInterviewSession] = (
+        db.query(TechnicalInterviewSession)
+        .filter(TechnicalInterviewSession.application_id == request.application_id)
+        .first()
+    )
+    if not session_row:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No interview session found for this application. "
+                "The interview invitation must be sent first."
+            ),
         )
-        
-        return InterviewResponse(
-            session_id=session_id,
-            livekit_room_name=room_name,
-            livekit_token=livekit_token,
-            status="started",
-            message=f"Interview started for application {request.application_id}"
+
+    if session_row.status == "Completed":
+        raise HTTPException(
+            status_code=400,
+            detail="This interview has already been completed.",
         )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to start interview: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
+    # ── 3. Set preliminary score + activate session ───────────────────────────
+    # Write 0.0 immediately so the React frontend never reads NULL while the
+    # agent is conducting the interview (prevents .toFixed() crash).
+    if session_row.overall_score is None:
+        session_row.overall_score = 0.0
 
-async def conduct_interview_background(
-    application_id: int,
-    mode: InterviewMode,
-    session_id: str,
-    room_name: str,
-    persona: str = "elite"
-):
-    """
-    Background task to conduct the actual interview
-    """
+    room_name = session_row.room_name
+    if not room_name:
+        room_name = f"interview-{session_row.session_id}"
+        session_row.room_name = room_name
+
+    session_row.status = "Active"
+    session_row.started_at = datetime.utcnow()
+    db.commit()
+    db.refresh(session_row)
+
+    # ── 4. Resolve job title for agent metadata ───────────────────────────────
+    posting: Optional[JobPosting] = application.posting if hasattr(application, "posting") else (
+        db.query(JobPosting)
+        .filter(JobPosting.posting_id == application.posting_id)
+        .first()
+    )
+    jr: Optional[JobRequisition] = (
+        db.query(JobRequisition)
+        .filter(JobRequisition.requisition_id == application.requisition_id)
+        .first()
+    ) if application.requisition_id else None
+
+    job_title = (
+        jr.job_title if jr and jr.job_title
+        else posting.job_title if posting and hasattr(posting, "job_title")
+        else "Technical Position"
+    )
+    candidate_name = f"{candidate.first_name or ''} {candidate.last_name or ''}".strip() or "Candidate"
+    requisition_id = jr.requisition_id if jr else 0
+
+    # ── 5. Build room metadata (read by the agent worker on connect) ──────────
+    room_metadata = json.dumps({
+        "session_id": session_row.session_id,
+        "application_id": request.application_id,
+        "candidate_name": candidate_name,
+        "job_title": job_title,
+        "requisition_id": requisition_id,
+    })
+
+    # ── 6. Generate signed LiveKit participant token ───────────────────────────
+    livekit_token = _generate_livekit_token(
+        api_key=settings.LIVEKIT_API_KEY,
+        api_secret=settings.LIVEKIT_API_SECRET,
+        room_name=room_name,
+        participant_identity=f"candidate_{request.application_id}",
+        participant_name=candidate_name,
+    )
+
+    # ── 7. Create LiveKit room + dispatch agent ────────────────────────────────
     try:
-        logger.info(f"Starting background interview for application {application_id} with persona: {persona}")
-        
-        # Conduct interview
-        session = await interview_agent.conduct_interview(application_id, mode, use_persona=persona)
-        
-        logger.info(f"Interview completed for session {session_id}")
-        
-    except Exception as e:
-        logger.error(f"Background interview failed for session {session_id}: {e}")
-        # TODO: Update interview status to failed in database
+        await _create_room_and_dispatch_agent(
+            livekit_url=settings.LIVEKIT_URL,
+            api_key=settings.LIVEKIT_API_KEY,
+            api_secret=settings.LIVEKIT_API_SECRET,
+            room_name=room_name,
+            room_metadata=room_metadata,
+            agent_name=settings.LIVEKIT_AGENT_NAME,
+        )
+    except Exception as exc:
+        logger.error(
+            "[interview/start] Failed to create room or dispatch agent: %s", exc
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"LiveKit infrastructure error: {exc}",
+        )
 
-
-@router.get("/status/{session_id}", response_model=InterviewStatus)
-async def get_interview_status(session_id: str):
-    """
-    Get real-time interview status
-    """
-    # TODO: Implement status tracking from LiveKit data channels
-    # For now, return mock status
-    return InterviewStatus(
-        session_id=session_id,
-        current_question=2,
-        total_questions=5,
-        confidence_score=0.75,
-        technical_accuracy=0.82,
-        status="in_progress"
+    return InterviewStartResponse(
+        session_id=session_row.session_id,
+        livekit_room_name=room_name,
+        livekit_token=livekit_token,
+        status="Active",
+        message=(
+            f"Interview room '{room_name}' is ready. "
+            f"The AI interviewer will join shortly."
+        ),
     )
 
 
-@router.get("/scorecard/{application_id}", response_model=CandidateScorecard)
-async def get_candidate_scorecard(
-    application_id: int,
-    db: Session = Depends(get_db)
+# ── GET /interviews/status/{session_id} ───────────────────────────────────────
+
+@router.get("/status/{session_id}", response_model=InterviewStatus)
+def get_interview_status(
+    session_id: int,
+    db: Session = Depends(get_db),
 ):
     """
-    Get comprehensive candidate scorecard including screening and interview results
+    Polling endpoint for the frontend. Safe to call while the interview is
+    in progress — overall_score is initialised to 0.0 so it is never NULL.
     """
-    try:
-        # Get semantic analysis report
-        report = db.query(SemanticAnalysisReport).filter(
-            SemanticAnalysisReport.application_id == application_id
-        ).first()
-        
-        if not report:
-            raise HTTPException(status_code=404, detail="No results found for application")
-        
-        # Parse interview results from ai_insights
-        interview_results = None
-        if report.ai_insights:
-            try:
-                insights_data = json.loads(report.ai_insights)
-                interview_results = insights_data.get("interview_results")
-            except json.JSONDecodeError:
-                pass
-        
-        if not interview_results:
-            raise HTTPException(
-                status_code=404,
-                detail="Interview results not available"
-            )
-        
-        # Parse HR explanation for gaps and strengths
-        hr_data = {}
-        if report.hr_explanation_json:
-            try:
-                hr_data = json.loads(report.hr_explanation_json)
-            except json.JSONDecodeError:
-                pass
-        
-        # Build scorecard
-        scorecard = CandidateScorecard(
-            candidate_id=str(report.application.candidate_id),
-            application_id=application_id,
-            session_id=interview_results.get("session_id", ""),
-            scores=interview_results.get("scores", {}),
-            recommendation=interview_results.get("recommendation", "Not evaluated"),
-            strengths=hr_data.get("strengths", []),
-            identified_gaps=hr_data.get("gaps", []),
-            interview_performance=interview_results.get("interview_performance", {}),
-            generated_at=interview_results.get("completed_at", datetime.utcnow().isoformat())
-        )
-        
-        return scorecard
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get scorecard: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    row = _get_session_or_404(session_id, db)
+    return InterviewStatus(
+        session_id=row.session_id,
+        status=row.status,
+        overall_score=float(row.overall_score) if row.overall_score is not None else 0.0,
+        summary=row.summary,
+    )
 
 
-@router.get("/eligible/{requisition_id}")
-async def get_interview_eligible_candidates(
-    requisition_id: int,
-    db: Session = Depends(get_db)
+# ── GET /interviews/scorecard/{session_id} ────────────────────────────────────
+
+@router.get("/scorecard/{session_id}", response_model=CandidateScorecard)
+def get_candidate_scorecard(
+    session_id: int,
+    db: Session = Depends(get_db),
 ):
     """
-    Get list of candidates eligible for interview based on screening results
+    Full interview result. Returns the transcript and combined score once
+    status == 'Completed'.
     """
-    try:
-        # Get job requisition
-        job_req = db.query(JobRequisition).filter(
-            JobRequisition.requisition_id == requisition_id
-        ).first()
-        
-        if not job_req:
-            raise HTTPException(status_code=404, detail="Job requisition not found")
-        
-        # Get applications with screening results
-        applications = db.query(Application).filter(
-            Application.requisition_id == requisition_id,
-            Application.status.in_(["screened", "shortlisted"])
-        ).all()
-        
-        eligible_candidates = []
-        for app in applications:
-            report = db.query(SemanticAnalysisReport).filter(
-                SemanticAnalysisReport.application_id == app.application_id
-            ).first()
-            
-            if report and report.match_percentage:
-                # Check if eligible for interview (score >= 65)
-                if report.match_percentage >= 65:
-                    eligible_candidates.append({
-                        "application_id": app.application_id,
-                        "candidate_id": app.candidate_id,
-                        "candidate_name": f"{app.candidate.first_name} {app.candidate.last_name}",
-                        "screening_score": report.match_percentage,
-                        "recommendation": report.recommendation_summary or "Not evaluated",
-                        "email": app.candidate.email
-                    })
-        
-        # Sort by screening score
-        eligible_candidates.sort(key=lambda x: x["screening_score"], reverse=True)
-        
-        return {
-            "requisition_id": requisition_id,
-            "job_title": job_req.job_title,
-            "eligible_candidates": eligible_candidates,
-            "total_eligible": len(eligible_candidates)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get eligible candidates: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+    row = _get_session_or_404(session_id, db)
 
+    application = row.application
+    candidate = application.candidate if application else None
+    candidate_name = (
+        f"{candidate.first_name or ''} {candidate.last_name or ''}".strip()
+        if candidate else "Unknown"
+    )
+
+    return CandidateScorecard(
+        session_id=row.session_id,
+        application_id=row.application_id,
+        candidate_name=candidate_name,
+        overall_score=float(row.overall_score) if row.overall_score is not None else 0.0,
+        overall_performance=row.overall_performance,
+        recommendation=row.recommendation,
+        summary=row.summary,
+        transcript=row.transcript,
+        status=row.status,
+        started_at=row.started_at.isoformat() if row.started_at else None,
+        ended_at=row.ended_at.isoformat() if row.ended_at else None,
+    )
+
+
+# ── POST /interviews/complete/{session_id} ────────────────────────────────────
 
 @router.post("/complete/{session_id}")
-async def mark_interview_completed(
-    session_id: str,
-    db: Session = Depends(get_db)
+def mark_interview_completed(
+    session_id: int,
+    db: Session = Depends(get_db),
 ):
     """
-    Mark interview as completed and trigger final evaluation.
-    Called by LiveKit webhook or candidate end-session action.
+    Fallback endpoint — marks the session Completed without a score.
+    Normally the agent worker writes the score via _persist_completion()
+    in livekit_agent.py. This endpoint exists for webhook / manual override.
     """
-    from ..models.db.technical_interview_session import TechnicalInterviewSession
-    from ..models.db.job_requisition import JobRequisition
-    from ..models.db.job_posting import JobPosting
+    row = _get_session_or_404(session_id, db)
 
-    session = db.query(TechnicalInterviewSession).filter(
-        TechnicalInterviewSession.session_id == int(session_id)
-        if session_id.isdigit() else None
-    ).first()
-
-    if not session:
-        raise HTTPException(status_code=404, detail="Interview session not found")
-
-    if session.status == "Completed":
+    if row.status == "Completed":
         return {"status": "already_completed", "session_id": session_id}
 
-    session.status = "Completed"
-    session.ended_at = datetime.utcnow()
+    row.status = "Completed"
+    row.ended_at = datetime.utcnow()
+    if row.overall_score is None:
+        row.overall_score = 0.0
     db.commit()
 
-    # Check if all sessions for this JR are done → trigger final ranking
-    application = session.application
+    # Trigger final ranking check
+    application = row.application
     posting = application.posting if application else None
-    if posting:
-        from tasks.interview_tasks import maybe_dispatch_final_ranking
-        maybe_dispatch_final_ranking.delay(posting.requisition_id)
+    if posting and hasattr(posting, "requisition_id"):
+        try:
+            from tasks.interview_tasks import maybe_dispatch_final_ranking
+            maybe_dispatch_final_ranking.delay(posting.requisition_id)
+        except Exception as exc:
+            logger.warning("[interview/complete] Final ranking dispatch failed: %s", exc)
 
     return {"status": "completed", "session_id": session_id}
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _get_session_or_404(session_id: int, db: Session) -> TechnicalInterviewSession:
+    row = (
+        db.query(TechnicalInterviewSession)
+        .filter(TechnicalInterviewSession.session_id == session_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Interview session {session_id} not found.")
+    return row
+
+
+def _generate_livekit_token(
+    api_key: str,
+    api_secret: str,
+    room_name: str,
+    participant_identity: str,
+    participant_name: str,
+) -> str:
+    """
+    Generate a signed LiveKit JWT that allows the participant to join the room.
+    Uses livekit-api (already in requirements).
+    """
+    from livekit.api import AccessToken, VideoGrants
+
+    token = (
+        AccessToken(api_key=api_key, api_secret=api_secret)
+        .with_identity(participant_identity)
+        .with_name(participant_name)
+        .with_grants(VideoGrants(room_join=True, room=room_name))
+        .to_jwt()
+    )
+    return token
+
+
+async def _create_room_and_dispatch_agent(
+    livekit_url: str,
+    api_key: str,
+    api_secret: str,
+    room_name: str,
+    room_metadata: str,
+    agent_name: str,
+) -> None:
+    """
+    1. Creates the LiveKit room with metadata so the agent worker can read it.
+    2. Dispatches the named agent worker to that room.
+
+    Requires livekit-api >= 0.7 for AgentDispatch support.
+    """
+    from livekit.api import LiveKitAPI
+    from livekit.api.models import CreateRoomRequest
+
+    async with LiveKitAPI(
+        url=livekit_url,
+        api_key=api_key,
+        api_secret=api_secret,
+    ) as lk:
+        # Create room with metadata (idempotent — LiveKit returns existing room if name matches)
+        await lk.room.create_room(
+            CreateRoomRequest(
+                name=room_name,
+                metadata=room_metadata,
+            )
+        )
+
+        # Dispatch agent worker — requires the agent process to be running with
+        #   python src/livekit_agent.py start
+        # and the LIVEKIT_AGENT_NAME env var to match agent_name.
+        try:
+            from livekit.api.models import CreateAgentDispatchRequest
+            await lk.agent_dispatch.create_dispatch(
+                CreateAgentDispatchRequest(
+                    agent_name=agent_name,
+                    room=room_name,
+                    metadata=room_metadata,
+                )
+            )
+            logger.info(
+                "[interview/start] Agent '%s' dispatched to room '%s'.",
+                agent_name, room_name,
+            )
+        except AttributeError:
+            # livekit-api < 0.7 does not have agent_dispatch; agent will auto-join
+            # if the LiveKit server is configured with auto-dispatch for this room.
+            logger.warning(
+                "[interview/start] AgentDispatch not available (livekit-api < 0.7). "
+                "Ensure the agent worker auto-dispatches or upgrade livekit-api."
+            )
