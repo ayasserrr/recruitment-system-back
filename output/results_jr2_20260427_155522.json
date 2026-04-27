@@ -1,0 +1,254 @@
+{
+  "jr_id": 2,
+  "generated_at": "2026-04-27T15:55:22.684632",
+  "leaderboard": [
+    {
+      "name": "Aya Yasser",
+      "candidate_id": 1,
+      "application_id": 1,
+      "assessment_id": 1,
+      "final_score": 0.2818,
+      "avg_depth": 0.1591,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "@app.post",
+            "create",
+            "route naming",
+            "FastAPI"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.25,
+          "comparative_score": 0.1,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.8,
+          "matched_keywords": [
+            "FastAPI",
+            "id"
+          ],
+          "missing_keywords": [
+            "optional parameter"
+          ],
+          "semantic_recovered": [
+            "route",
+            "default value"
+          ],
+          "match_count": 4,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "images",
+            "containers",
+            "template"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 0.2,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Pydantic",
+            "request body",
+            "validation",
+            "FastAPI"
+          ],
+          "semantic_recovered": [
+            "nested model"
+          ],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.2,
+          "matched_keywords": [
+            "FROM"
+          ],
+          "missing_keywords": [
+            "Dockerfile",
+            "multi-stage build",
+            "optimization",
+            "base image"
+          ],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 0.25,
+          "comparative_score": 0.7,
+          "is_external": false
+        },
+        "Prompt Templates": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "PromptTemplate",
+            "LangChain",
+            "variable interpolation",
+            "message types"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Output Parsers": {
+          "coverage_score": 0.2,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "JsonOutputParser",
+            "LangChain",
+            "parsing failures",
+            "graceful"
+          ],
+          "semantic_recovered": [
+            "error handling"
+          ],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 0.25,
+          "comparative_score": 0.7,
+          "is_external": false
+        },
+        "Data Structures": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "list",
+            "tuple",
+            "immutable",
+            "performance",
+            "data integrity"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Functions & Scope": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "*args",
+            "**kwargs",
+            "positional arguments",
+            "keyword arguments",
+            "flexibility"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "OOP Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "inheritance",
+            "object-oriented programming",
+            "code reuse",
+            "shared behavior",
+            "subclasses"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        }
+      }
+    }
+  ],
+  "keyword_gap_report": {
+    "Basic Routes (GET POST PUT DELETE)": [
+      "@app.post",
+      "create",
+      "route naming",
+      "FastAPI"
+    ],
+    "Path & Query Parameters": [
+      "optional parameter"
+    ],
+    "Images & Containers": [
+      "Docker",
+      "images",
+      "containers",
+      "template"
+    ],
+    "Request Body + Pydantic Models": [
+      "Pydantic",
+      "request body",
+      "validation",
+      "FastAPI"
+    ],
+    "Dockerfile Basics": [
+      "Dockerfile",
+      "multi-stage build",
+      "optimization",
+      "base image"
+    ],
+    "Prompt Templates": [
+      "PromptTemplate",
+      "LangChain",
+      "variable interpolation",
+      "message types"
+    ],
+    "Output Parsers": [
+      "JsonOutputParser",
+      "LangChain",
+      "parsing failures",
+      "graceful"
+    ],
+    "Data Structures": [
+      "list",
+      "tuple",
+      "immutable",
+      "performance",
+      "data integrity"
+    ],
+    "Functions & Scope": [
+      "*args",
+      "**kwargs",
+      "positional arguments",
+      "keyword arguments",
+      "flexibility"
+    ],
+    "OOP Basics": [
+      "inheritance",
+      "object-oriented programming",
+      "code reuse",
+      "shared behavior",
+      "subclasses"
+    ]
+  }
+}
