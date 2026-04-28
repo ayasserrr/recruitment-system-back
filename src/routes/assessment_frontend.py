@@ -176,20 +176,21 @@ def get_assessment_candidates(
 
     # Use leaderboard as primary source (most complete data)
     rows = (
-        db.query(AssessmentLeaderboard, CandidateAssessment, Application, Candidate)
+        db.query(AssessmentLeaderboard, CandidateAssessment, Application, Candidate, AssessmentReport)
         .join(
             CandidateAssessment,
             CandidateAssessment.assessment_id == AssessmentLeaderboard.assessment_id,
         )
         .join(Application, Application.application_id == AssessmentLeaderboard.application_id)
         .join(Candidate, Candidate.candidate_id == AssessmentLeaderboard.candidate_id)
+        .outerjoin(AssessmentReport, AssessmentReport.assessment_id == AssessmentLeaderboard.assessment_id)
         .filter(AssessmentLeaderboard.jr_id == job_id)
         .order_by(AssessmentLeaderboard.rank.asc())
         .all()
     )
 
     result: List[AssessmentCandidate] = []
-    for lb, ca, app, cand in rows:
+    for lb, ca, app, cand, ar in rows:
         score = float(lb.final_score or 0)
         time_spent_str = "N/A"
         if ca.started_at and ca.submitted_at:
@@ -240,6 +241,7 @@ def get_assessment_candidates(
                 codingScore=None,
                 theoryScore=None,
                 completed=completed_date,
+                shapSummary=ar.shap_summary if ar else None,
                 email=cand.email,
                 phone=cand.phone,
                 experience=exp_label,

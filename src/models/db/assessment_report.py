@@ -11,8 +11,10 @@ class AssessmentReport(Base):
     ai_feedback = Column(Text, nullable=True)
     strengths = Column(Text, nullable=True)
     weaknesses = Column(Text, nullable=True)
-    rank_in_pool = Column(Integer, nullable=True)
-    recommendation = Column(Text, nullable=True)
-    generated_at = Column(DateTime, server_default=func.now())
+    rank_in_pool   = Column(Integer,  nullable=True)
+    recommendation = Column(Text,     nullable=True)
+    # ── Ensemble SHAP explanation ─────────────────────────────────────────────
+    shap_summary   = Column(Text,     nullable=True)   # human-readable SHAP narrative
+    generated_at   = Column(DateTime, server_default=func.now())
 
     assessment = relationship("CandidateAssessment", back_populates="assessment_report")

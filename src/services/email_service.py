@@ -470,6 +470,112 @@ def send_interview_invitation_sync(
         return False
 
 
+# ── HR interview invitation ───────────────────────────────────────────────────
+
+def _build_hr_interview_invitation_message(
+    recipient_email: str,
+    first_name: str,
+    job_title: str,
+    interview_deadline: str,
+) -> MIMEMultipart:
+    cfg = get_settings()
+    sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"HR Interview Invitation — {job_title}"
+    msg["From"] = sender
+    msg["To"] = recipient_email
+
+    plain = (
+        f"Dear {first_name},\n\n"
+        f"Congratulations! You have successfully completed the technical interview stage "
+        f"and have been selected to move forward to the HR Interview for the "
+        f"{job_title} position.\n\n"
+        f"Our HR team will be in touch shortly to schedule your interview session.\n"
+        f"Please ensure you are available before: {interview_deadline}\n\n"
+        f"What to expect:\n"
+        f"  • The HR interview typically takes 30–45 minutes.\n"
+        f"  • Topics include your background, motivation, culture fit, and leadership style.\n"
+        f"  • Be prepared to discuss your previous experiences and career goals.\n\n"
+        f"We look forward to speaking with you!\n\n"
+        f"Best regards,\n"
+        f"TalentPilot AI Recruitment Team"
+    )
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; color: #333; max-width: 600px; margin: auto;">
+        <h2 style="color: #0f172a;">You're Invited to an HR Interview!</h2>
+        <p>Dear <strong>{first_name}</strong>,</p>
+        <p>
+          Congratulations! You have successfully passed the <strong>technical interview</strong>
+          and have been selected to advance to the <strong>HR Interview</strong> for the
+          <strong>{job_title}</strong> position.
+        </p>
+        <p>Our HR team will contact you to schedule your session before: <strong>{interview_deadline}</strong></p>
+        <ul style="color:#555;font-size:14px;">
+          <li>The HR interview typically takes 30–45 minutes.</li>
+          <li>Topics include your background, motivation, culture fit, and leadership style.</li>
+          <li>Be prepared to discuss your previous experiences and career goals.</li>
+        </ul>
+        <p>We look forward to speaking with you!</p>
+        <p style="color:#666;font-size:13px;">
+          This is an automated message from TalentPilot AI Recruitment Team.
+        </p>
+      </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(plain, "plain"))
+    msg.attach(MIMEText(html, "html"))
+    return msg
+
+
+def send_hr_interview_invitation_sync(
+    recipient_email: str,
+    first_name: str,
+    job_title: str,
+    interview_deadline: str,
+) -> bool:
+    """
+    Send an HR interview invitation email synchronously (blocking).
+    Intended for use in Celery workers. Returns True on success, False on failure.
+    """
+    cfg = get_settings()
+
+    if not cfg.SMTP_USER or not cfg.SMTP_PASSWORD:
+        logger.warning(
+            "[email] SMTP not configured — skipping HR invitation for %s.",
+            recipient_email,
+        )
+        return False
+
+    try:
+        msg = _build_hr_interview_invitation_message(
+            recipient_email=recipient_email,
+            first_name=first_name,
+            job_title=job_title,
+            interview_deadline=interview_deadline,
+        )
+        with smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(cfg.SMTP_USER, cfg.SMTP_PASSWORD)
+            server.sendmail(cfg.SMTP_USER, recipient_email, msg.as_string())
+
+        logger.info(
+            "[email] HR interview invitation sent to %s for job '%s'.",
+            recipient_email, job_title,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "[email] Failed to send HR interview invitation to %s: %s",
+            recipient_email, exc,
+        )
+        return False
+
+
 # ── Final hire/no-hire decision notification ──────────────────────────────────
 
 def _build_final_decision_message(

@@ -31,6 +31,7 @@ from models.schemas.frontend_schemas import (
     HRInterviewOverview,
     ScheduleInterviewRequest,
     SubmitHRScoresRequest,
+    TranscriptRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,12 @@ def get_hr_interview_candidates(
                 motivation=sub.get("motivation"),
                 teamwork=sub.get("teamwork"),
                 overall=overall,
+                emotionScore=float(session.emotion_score) if session.emotion_score is not None else None,
+                sentimentScore=float(session.sentiment_score) if session.sentiment_score is not None else None,
+                nliAlignScore=float(session.nli_align_score) if session.nli_align_score is not None else None,
+                semanticDepthScore=float(session.semantic_depth_score) if session.semantic_depth_score is not None else None,
+                shapSummary=session.shap_summary,
+                hasTranscript=bool(session.transcript),
                 status=session.status or "Scheduled",
                 interviewer=session.interviewer_name,
                 date=interview_date,
@@ -361,11 +368,62 @@ def submit_hr_scores(
         "sub_scores": sub_scores,
         "feedback": body.feedback,
     })
+    if body.transcript:
+        session.transcript = body.transcript
 
     db.commit()
+
+    # Trigger final ranking if all HR sessions are now done
+    try:
+        from tasks.interview_tasks import maybe_dispatch_final_ranking_after_hr
+        maybe_dispatch_final_ranking_after_hr.delay(jr.requisition_id)
+    except Exception:
+        logger.warning("[hr_submit] Failed to dispatch ranking check for JR %d.", jr.requisition_id)
 
     return {
         "message": "HR scores submitted.",
         "candidateId": body.candidateId,
         "overall": overall,
     }
+
+
+# ── PATCH /api/v1/jobs/{jobId}/hr-interview/{candidateId}/transcript ──────────
+
+@router.patch(
+    "/{job_id}/hr-interview/{candidate_id}/transcript",
+    summary="Store or update the HR interview transcript for AI analysis",
+)
+def update_hr_transcript(
+    job_id: int,
+    candidate_id: int,
+    body: TranscriptRequest,
+    ctx: dict = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    jr, posting = _require_jr_posting(job_id, ctx["company_id"], db)
+    if not posting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job posting not found.")
+
+    app: Optional[Application] = (
+        db.query(Application)
+        .filter(
+            Application.posting_id == posting.posting_id,
+            Application.candidate_id == candidate_id,
+        )
+        .first()
+    )
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate application not found.")
+
+    session: Optional[HRInterviewSession] = (
+        db.query(HRInterviewSession)
+        .filter(HRInterviewSession.application_id == app.application_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No HR interview session found for this candidate.")
+
+    session.transcript = body.transcript
+    db.commit()
+
+    return {"message": "Transcript saved.", "candidateId": candidate_id}

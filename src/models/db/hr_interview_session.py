@@ -13,11 +13,21 @@ class HRInterviewSession(Base):
     started_at = Column(DateTime, nullable=True)
     ended_at = Column(DateTime, nullable=True)
     interviewer_name = Column(String(255), nullable=True)
-    overall_score = Column(Numeric(6, 2), nullable=True)
-    overall_performance = Column(String(100), nullable=True)
-    summary = Column(Text, nullable=True)
-    recommendation = Column(String(100), nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
+    overall_score       = Column(Numeric(6, 2), nullable=True)
+    overall_performance = Column(String(100),  nullable=True)
+    summary             = Column(Text,         nullable=True)
+    recommendation      = Column(String(100),  nullable=True)
+    # ── Full verbatim transcript (populated after interview ends) ─────────────
+    transcript          = Column(Text,         nullable=True)
+    # ── HR ensemble model scores ──────────────────────────────────────────────
+    emotion_score        = Column(Numeric(6, 4), nullable=True)  # Go-Emotions positive aggregate
+    sentiment_score      = Column(Numeric(6, 4), nullable=True)  # RoBERTa tone/professionalism
+    nli_align_score      = Column(Numeric(6, 4), nullable=True)  # DeBERTa responsibility alignment
+    semantic_depth_score = Column(Numeric(6, 4), nullable=True)  # BGE depth vs JD
+    # ── SHAP ─────────────────────────────────────────────────────────────────
+    shap_json            = Column(Text,          nullable=True)  # JSON dict of per-feature SHAP
+    shap_summary         = Column(Text,          nullable=True)  # human-readable SHAP narrative
+    created_at           = Column(DateTime, server_default=func.now())
 
     application = relationship("Application", back_populates="hr_interview_session")
     config = relationship("HRInterviewConfig", back_populates="sessions")

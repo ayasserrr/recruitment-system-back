@@ -1,16 +1,19 @@
 """
-Final Ranking endpoints.
+Final Ranking endpoints — 4-Stage Pipeline (Screening 20% / Assessment 25% / Tech 30% / HR 25%).
 
 GET  /api/v1/jobs/{jobId}/final-ranking                              — ranked list
-POST /api/v1/jobs/{jobId}/final-ranking/{candidateId}/shortlist      — shortlist candidate
-POST /api/v1/jobs/{jobId}/final-ranking/{candidateId}/offer          — send offer email
+GET  /api/v1/jobs/{jobId}/final-ranking/{candidateId}/shap-report   — per-candidate SHAP detail
+POST /api/v1/jobs/{jobId}/trigger-ranking                           — trigger pipeline run
+POST /api/v1/jobs/{jobId}/final-ranking/{candidateId}/shortlist     — shortlist candidate
+POST /api/v1/jobs/{jobId}/final-ranking/{candidateId}/offer         — send offer email
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.deps import get_current_company
@@ -23,21 +26,17 @@ from models.db.job_requisition import JobRequisition
 from models.db.shortlisted_candidate import ShortlistedCandidate
 from models.schemas.frontend_schemas import (
     FinalRankingItem,
+    SHAPReportResponse,
     SendOfferRequest,
     ShortlistRequest,
     ShortlistResponse,
+    TriggerRankingResponse,
     match_label,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["final-ranking"])
-
-# Score weights: semantic 20%, assessment 30%, technical 30%, HR 20%
-_W_SEMANTIC = 0.20
-_W_ASSESSMENT = 0.30
-_W_TECHNICAL = 0.30
-_W_HR = 0.20
 
 
 def _require_jr_posting(job_id: int, company_id: int, db: Session):
@@ -90,7 +89,7 @@ def _recommendation_label(score: float, red_flag: bool) -> str:
 @router.get(
     "/{job_id}/final-ranking",
     response_model=List[FinalRankingItem],
-    summary="Final ranked candidate list",
+    summary="Final ranked candidate list (4-stage: Screening 20% / Assessment 25% / Tech 30% / HR 25%)",
 )
 def get_final_ranking(
     job_id: int,
@@ -112,36 +111,11 @@ def get_final_ranking(
 
     result: List[FinalRankingItem] = []
     for ranking, app, cand in rows:
-        # Use weighted_total_score from DB (computed by the pipeline) as the primary score
+        # Use the pipeline-computed weighted_total_score — do NOT re-weight here.
+        # The backend pipeline (score_candidates_node) applies 20/25/30/25 correctly
+        # and redistributes proportionally when any stage is absent.
         overall = float(ranking.weighted_total_score or 0)
-
-        # Recompute using frontend weights if sub-scores exist
-        sem = float(ranking.semantic_score or 0)
-        asm = float(ranking.assessment_score or 0)
-        tech = float(ranking.technical_interview_score or 0)
-        hr = float(ranking.hr_interview_score or 0)
-
-        # If we have all sub-scores, reweight for frontend display
-        if sem or asm or tech or hr:
-            parts = []
-            weights_used = 0.0
-            if sem:
-                parts.append(sem * _W_SEMANTIC)
-                weights_used += _W_SEMANTIC
-            if asm:
-                parts.append(asm * _W_ASSESSMENT)
-                weights_used += _W_ASSESSMENT
-            if tech:
-                # tech interview score is on 0–10 scale; normalise to 0–100
-                parts.append((tech * 10) * _W_TECHNICAL)
-                weights_used += _W_TECHNICAL
-            if hr:
-                parts.append((hr * 10) * _W_HR)
-                weights_used += _W_HR
-            if weights_used > 0 and parts:
-                overall = round(sum(parts) / weights_used, 2)
-
-        red_flag = ranking.red_flag or False
+        red_flag = bool(ranking.red_flag)
 
         # Application status
         app_status = app.status or "Applied"
@@ -158,18 +132,130 @@ def get_final_ranking(
                 id=cand.candidate_id,
                 name=f"{cand.first_name} {cand.last_name}".strip(),
                 email=cand.email,
+                finalRank=ranking.final_rank,
                 overallScore=round(overall, 2),
-                semanticScore=round(sem, 2) if sem else None,
-                assessmentScore=round(asm, 2) if asm else None,
-                technicalScore=round(float(ranking.technical_interview_score or 0), 2) or None,
-                cultureFitScore=round(float(ranking.hr_interview_score or 0), 2) or None,
+                # All phase scores stored as 0-100 by the pipeline — no ×10 needed
+                semanticScore=round(float(ranking.semantic_score), 2) if ranking.semantic_score is not None else None,
+                assessmentScore=round(float(ranking.assessment_score), 2) if ranking.assessment_score is not None else None,
+                technicalScore=round(float(ranking.technical_interview_score), 2) if ranking.technical_interview_score is not None else None,
+                hrScore=round(float(ranking.hr_interview_score), 2) if ranking.hr_interview_score is not None else None,
                 recommendation=_recommendation_label(overall, red_flag),
                 hireProbability=_hire_probability(overall, red_flag),
                 applicationStatus=app_status,
+                redFlag=red_flag,
+                redFlagReason=ranking.red_flag_reason,
+                shapSummary=ranking.shap_summary,
             )
         )
 
     return result
+
+
+# ── GET /api/v1/jobs/{jobId}/final-ranking/{candidateId}/shap-report ──────────
+
+@router.get(
+    "/{job_id}/final-ranking/{candidate_id}/shap-report",
+    response_model=SHAPReportResponse,
+    summary="Cross-phase SHAP explainability report for a single candidate",
+)
+def get_candidate_shap_report(
+    job_id: int,
+    candidate_id: int,
+    ctx: dict = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    jr, posting = _require_jr_posting(job_id, ctx["company_id"], db)
+    if not posting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job posting not found.")
+
+    app: Optional[Application] = (
+        db.query(Application)
+        .filter(
+            Application.posting_id == posting.posting_id,
+            Application.candidate_id == candidate_id,
+        )
+        .first()
+    )
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate application not found.")
+
+    ranking: Optional[FinalRanking] = (
+        db.query(FinalRanking)
+        .filter(FinalRanking.application_id == app.application_id)
+        .first()
+    )
+    if not ranking:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Final ranking not computed yet for this candidate.")
+
+    cand: Optional[Candidate] = (
+        db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
+    )
+
+    # Parse SHAP JSON: {"screening": φ, "assessment": φ, "tech_interview": φ, "hr_interview": φ}
+    shap_data: dict = {}
+    if ranking.shap_json:
+        try:
+            shap_data = json.loads(ranking.shap_json)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return SHAPReportResponse(
+        candidateId=candidate_id,
+        candidateName=f"{cand.first_name} {cand.last_name}".strip() if cand else "Unknown",
+        overallScore=round(float(ranking.weighted_total_score or 0), 2),
+        finalRank=ranking.final_rank,
+        shapScreening=shap_data.get("screening"),
+        shapAssessment=shap_data.get("assessment"),
+        shapTechInterview=shap_data.get("tech_interview"),
+        shapHrInterview=shap_data.get("hr_interview"),
+        shapSummary=ranking.shap_summary,
+        # Weights are stored implicitly in the SHAP values; expose the defaults for display
+        weightScreening=0.20,
+        weightAssessment=0.25,
+        weightTechInterview=0.30,
+        weightHrInterview=0.25,
+        redFlag=bool(ranking.red_flag),
+        redFlagReason=ranking.red_flag_reason,
+    )
+
+
+# ── POST /api/v1/jobs/{jobId}/trigger-ranking ─────────────────────────────────
+
+@router.post(
+    "/{job_id}/trigger-ranking",
+    response_model=TriggerRankingResponse,
+    summary="Trigger the 8-node Final Ranking pipeline for this job",
+)
+def trigger_final_ranking(
+    job_id: int,
+    background_tasks: BackgroundTasks,
+    ctx: dict = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    jr, posting = _require_jr_posting(job_id, ctx["company_id"], db)
+
+    if jr.processing_status == "processing":
+        return TriggerRankingResponse(
+            message="Ranking pipeline is already running for this job.",
+            requisitionId=job_id,
+            status="already_running",
+        )
+
+    def _run_ranking(requisition_id: int):
+        try:
+            from services.ranking_service import compute_final_rankings
+            compute_final_rankings(requisition_id)
+        except Exception as exc:
+            logger.error("[trigger-ranking] Pipeline error for JR %d: %s", requisition_id, exc)
+
+    background_tasks.add_task(_run_ranking, job_id)
+    logger.info("[trigger-ranking] Queued final ranking for JR %d.", job_id)
+
+    return TriggerRankingResponse(
+        message="Final ranking pipeline started in background.",
+        requisitionId=job_id,
+        status="started",
+    )
 
 
 # ── POST /api/v1/jobs/{jobId}/final-ranking/{candidateId}/shortlist ───────────
@@ -199,10 +285,7 @@ def shortlist_candidate(
         .first()
     )
     if not app:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Candidate application not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate application not found.")
 
     existing: Optional[ShortlistedCandidate] = (
         db.query(ShortlistedCandidate)
@@ -224,7 +307,6 @@ def shortlist_candidate(
     db.add(entry)
     app.status = "Shortlisted"
     db.commit()
-
     return ShortlistResponse(status="Shortlisted")
 
 
@@ -232,7 +314,7 @@ def shortlist_candidate(
 
 @router.post(
     "/{job_id}/final-ranking/{candidate_id}/offer",
-    summary="Send an offer to a candidate",
+    summary="Send a job offer to a candidate",
 )
 def send_offer(
     job_id: int,
@@ -254,10 +336,7 @@ def send_offer(
         .first()
     )
     if not app:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Candidate application not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate application not found.")
 
     cand: Optional[Candidate] = (
         db.query(Candidate).filter(Candidate.candidate_id == candidate_id).first()
@@ -265,11 +344,9 @@ def send_offer(
     if not cand:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
 
-    # Update application status
     app.status = "Offer Extended"
     db.commit()
 
-    # Send offer email
     email_sent = False
     try:
         from services.email_service import send_offer_email_sync
@@ -288,11 +365,7 @@ def send_offer(
             company_name=jr.company.name if jr.company else "Our Company",
         )
     except Exception:
-        logger.warning(
-            "[offer] Email service unavailable — status updated but email not sent. "
-            "Candidate %d, JR %d.",
-            candidate_id, job_id,
-        )
+        logger.warning("[offer] Email service unavailable for candidate %d JR %d.", candidate_id, job_id)
 
     return {
         "message": "Offer extended." + (" Email sent." if email_sent else " Email service unavailable."),

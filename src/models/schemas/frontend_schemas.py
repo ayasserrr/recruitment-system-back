@@ -185,7 +185,6 @@ class AssessmentOverview(BaseModel):
 
 
 class AssessmentCandidate(BaseModel):
-    # pipeline stage scores
     id: int
     name: str
     score: float
@@ -196,6 +195,8 @@ class AssessmentCandidate(BaseModel):
     codingScore: Optional[float] = None
     theoryScore: Optional[float] = None
     completed: Optional[str] = None
+    # AI ensemble explainability
+    shapSummary: Optional[str] = None
     # full candidate profile
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -235,16 +236,25 @@ class TechInterviewOverview(BaseModel):
 class TechInterviewCandidate(BaseModel):
     id: int
     name: str
+    # Human-entered sub-scores (from submit-scores endpoint)
     technicalScore: Optional[float] = None
     problemSolving: Optional[float] = None
     systemDesign: Optional[float] = None
     coding: Optional[float] = None
     communication: Optional[float] = None
     overall: Optional[float] = None
+    # AI ensemble model scores (CodeBERT + RoBERTa-QA + DeBERTa NLI + TF-IDF)
+    codebertScore: Optional[float] = None
+    robertaDepthScore: Optional[float] = None
+    nliTechnicalScore: Optional[float] = None
+    tfidfTechnicalScore: Optional[float] = None
+    shapSummary: Optional[str] = None
+    # session metadata
     status: str
     interviewer: Optional[str] = None
     date: Optional[str] = None
     feedback: Optional[str] = None
+    hasTranscript: bool = False
     # full candidate profile
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -271,6 +281,13 @@ class SubmitTechScoresRequest(BaseModel):
     coding: float
     communication: float
     feedback: Optional[str] = None
+    # Transcript text enables CodeBERT + RoBERTa-QA AI analysis
+    transcript: Optional[str] = None
+
+
+class TranscriptRequest(BaseModel):
+    """Submit or update a plain-text interview transcript."""
+    transcript: str
 
 
 # ── HR Interview ───────────────────────────────────────────────────────────────
@@ -292,16 +309,25 @@ class HRInterviewOverview(BaseModel):
 class HRInterviewCandidate(BaseModel):
     id: int
     name: str
+    # Human-entered sub-scores
     cultureFit: Optional[float] = None
     communication: Optional[float] = None
     leadership: Optional[float] = None
     motivation: Optional[float] = None
     teamwork: Optional[float] = None
     overall: Optional[float] = None
+    # AI ensemble model scores (Go-Emotions + RoBERTa-Sentiment + DeBERTa NLI + BGE)
+    emotionScore: Optional[float] = None
+    sentimentScore: Optional[float] = None
+    nliAlignScore: Optional[float] = None
+    semanticDepthScore: Optional[float] = None
+    shapSummary: Optional[str] = None
+    # session metadata
     status: str
     interviewer: Optional[str] = None
     date: Optional[str] = None
     feedback: Optional[str] = None
+    hasTranscript: bool = False
     # full candidate profile
     email: Optional[str] = None
     phone: Optional[str] = None
@@ -320,6 +346,8 @@ class SubmitHRScoresRequest(BaseModel):
     motivation: float
     teamwork: float
     feedback: Optional[str] = None
+    # Transcript text enables Go-Emotions + Sentiment AI analysis
+    transcript: Optional[str] = None
 
 
 # ── Final Ranking ──────────────────────────────────────────────────────────────
@@ -328,14 +356,50 @@ class FinalRankingItem(BaseModel):
     id: int
     name: str
     email: Optional[str] = None
+    # Core ranking fields
+    finalRank: Optional[int] = None
     overallScore: float
+    # Per-stage scores (all 0-100)
     semanticScore: Optional[float] = None
     assessmentScore: Optional[float] = None
-    technicalScore: Optional[float] = None
-    cultureFitScore: Optional[float] = None
+    technicalScore: Optional[float] = None      # technical interview (0-100)
+    hrScore: Optional[float] = None             # HR interview (0-100)
+    # Decision fields
     recommendation: str
     hireProbability: int
     applicationStatus: str
+    # Red-flag detection
+    redFlag: bool = False
+    redFlagReason: Optional[str] = None
+    # Cross-phase SHAP explainability
+    shapSummary: Optional[str] = None
+
+
+class SHAPReportResponse(BaseModel):
+    """Detailed SHAP breakdown for a single candidate at final ranking stage."""
+    candidateId: int
+    candidateName: str
+    overallScore: float
+    finalRank: Optional[int] = None
+    # Per-phase SHAP contributions (phi values, can be negative)
+    shapScreening: Optional[float] = None
+    shapAssessment: Optional[float] = None
+    shapTechInterview: Optional[float] = None
+    shapHrInterview: Optional[float] = None
+    shapSummary: Optional[str] = None
+    # Active weights used in this ranking run
+    weightScreening: Optional[float] = None
+    weightAssessment: Optional[float] = None
+    weightTechInterview: Optional[float] = None
+    weightHrInterview: Optional[float] = None
+    redFlag: bool = False
+    redFlagReason: Optional[str] = None
+
+
+class TriggerRankingResponse(BaseModel):
+    message: str
+    requisitionId: int
+    status: str     # "started" | "already_running" | "completed"
 
 
 class ShortlistRequest(BaseModel):

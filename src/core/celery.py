@@ -99,7 +99,12 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.assessment_tasks.scan_and_dispatch_assessment_ranking",
         "schedule": 300.0,
     },
-    # Final ranking after interview deadline — 5-minute cadence
+    # HR interview invitations when tech deadline passes — 5-minute cadence
+    "scan-hr-interviews-every-5-minutes": {
+        "task": "tasks.interview_tasks.scan_and_dispatch_hr_interviews",
+        "schedule": 300.0,
+    },
+    # Final ranking after HR interview deadline — 5-minute cadence
     "scan-final-ranking-every-5-minutes": {
         "task": "tasks.interview_tasks.scan_and_dispatch_final_ranking",
         "schedule": 300.0,

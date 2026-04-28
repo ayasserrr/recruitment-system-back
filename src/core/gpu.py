@@ -11,6 +11,13 @@ in the Celery log.
 """
 
 import logging
+import os
+
+# Redirect all HuggingFace model downloads/loads to E: drive cache.
+# Must be set before any sentence_transformers / transformers / FlagEmbedding import.
+os.environ.setdefault("HF_HOME", "E:/huggingface_cache")
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", "E:/huggingface_cache")
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "E:/huggingface_cache")
 
 import torch
 

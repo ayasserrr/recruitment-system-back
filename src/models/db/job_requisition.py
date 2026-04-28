@@ -35,9 +35,12 @@ class JobRequisition(Base):
     assessment_generated_at = Column(DateTime, nullable=True)
     hr_report_path = Column(String(500), nullable=True)
     results_json_path = Column(String(500), nullable=True)
-    # Interview phase flags
+    # Technical interview phase flags
     interview_notified = Column(Boolean, default=False, nullable=False)
     interview_deadline = Column(DateTime, nullable=True)
+    # HR interview phase flags
+    hr_interview_notified = Column(Boolean, default=False, nullable=False)
+    hr_interview_deadline = Column(DateTime, nullable=True)
     # Pipeline concurrency guard — prevents duplicate Celery dispatches
     # Values: 'idle' | 'processing' | 'error'
     processing_status = Column(String(20), default="idle", nullable=False, server_default="idle")

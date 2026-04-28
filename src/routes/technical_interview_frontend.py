@@ -32,6 +32,7 @@ from models.schemas.frontend_schemas import (
     SubmitTechScoresRequest,
     TechInterviewCandidate,
     TechInterviewOverview,
+    TranscriptRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,6 +217,12 @@ def get_tech_interview_candidates(
                 coding=sub.get("coding"),
                 communication=sub.get("communication"),
                 overall=overall,
+                codebertScore=float(session.codebert_score) if session.codebert_score is not None else None,
+                robertaDepthScore=float(session.roberta_depth_score) if session.roberta_depth_score is not None else None,
+                nliTechnicalScore=float(session.nli_technical_score) if session.nli_technical_score is not None else None,
+                tfidfTechnicalScore=float(session.tfidf_technical_score) if session.tfidf_technical_score is not None else None,
+                shapSummary=session.shap_summary,
+                hasTranscript=bool(session.transcript),
                 status=session.status or "Scheduled",
                 interviewer=session.interviewer_name,
                 date=interview_date,
@@ -371,11 +378,62 @@ def submit_tech_scores(
         "sub_scores": sub_scores,
         "feedback": body.feedback,
     })
+    if body.transcript:
+        session.transcript = body.transcript
 
     db.commit()
+
+    # Trigger HR invitation check if all tech sessions are now done
+    try:
+        from tasks.interview_tasks import maybe_dispatch_final_ranking
+        maybe_dispatch_final_ranking.delay(jr.requisition_id)
+    except Exception:
+        logger.warning("[tech_submit] Failed to dispatch HR check for JR %d.", jr.requisition_id)
 
     return {
         "message": "Scores submitted.",
         "candidateId": body.candidateId,
         "overall": overall,
     }
+
+
+# ── PATCH /api/v1/jobs/{jobId}/technical-interview/{candidateId}/transcript ───
+
+@router.patch(
+    "/{job_id}/technical-interview/{candidate_id}/transcript",
+    summary="Store or update the interview transcript for AI analysis",
+)
+def update_tech_transcript(
+    job_id: int,
+    candidate_id: int,
+    body: TranscriptRequest,
+    ctx: dict = Depends(get_current_company),
+    db: Session = Depends(get_db),
+):
+    jr, posting = _require_jr_posting(job_id, ctx["company_id"], db)
+    if not posting:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job posting not found.")
+
+    app: Optional[Application] = (
+        db.query(Application)
+        .filter(
+            Application.posting_id == posting.posting_id,
+            Application.candidate_id == candidate_id,
+        )
+        .first()
+    )
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate application not found.")
+
+    session: Optional[TechnicalInterviewSession] = (
+        db.query(TechnicalInterviewSession)
+        .filter(TechnicalInterviewSession.application_id == app.application_id)
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No interview session found for this candidate.")
+
+    session.transcript = body.transcript
+    db.commit()
+
+    return {"message": "Transcript saved.", "candidateId": candidate_id}

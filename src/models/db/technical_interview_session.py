@@ -22,6 +22,14 @@ class TechnicalInterviewSession(Base):
     recommendation = Column(String(100), nullable=True)
     # Full verbatim transcript of the voice interview, populated by livekit_agent.py
     transcript = Column(Text, nullable=True)
+    # ── Technical ensemble model scores (populated by tech_interview_node) ────
+    codebert_score       = Column(Numeric(6, 4), nullable=True)  # CodeBERT semantic depth
+    roberta_depth_score  = Column(Numeric(6, 4), nullable=True)  # RoBERTa-QA extraction score
+    nli_technical_score  = Column(Numeric(6, 4), nullable=True)  # DeBERTa NLI technical alignment
+    tfidf_technical_score = Column(Numeric(6, 4), nullable=True) # TF-IDF keyword coverage
+    # ── SHAP ─────────────────────────────────────────────────────────────────
+    shap_json    = Column(Text, nullable=True)   # JSON per-model SHAP values
+    shap_summary = Column(Text, nullable=True)   # human-readable narrative
     created_at = Column(DateTime, server_default=func.now())
 
     application = relationship("Application", back_populates="technical_interview_session")

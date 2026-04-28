@@ -19,6 +19,9 @@ class FinalRanking(Base):
     # Red-flag: CV #1 but failed live technical interview
     red_flag = Column(Boolean, default=False, nullable=False)
     red_flag_reason = Column(Text, nullable=True)
+    # Cross-phase SHAP explanation
+    shap_json    = Column(Text, nullable=True)  # JSON {"screening": φ, "assessment": φ, "hr_interview": φ}
+    shap_summary = Column(Text, nullable=True)  # human-readable cross-phase narrative
     generated_at = Column(DateTime, server_default=func.now())
 
     application = relationship("Application", back_populates="final_ranking")

@@ -35,16 +35,18 @@ def persist_rankings_node(state: FinalRankingState) -> FinalRankingState:
                 .first()
             )
             if existing:
-                existing.semantic_score = row["semantic_score"]
-                existing.assessment_score = row["assessment_score"]
+                existing.semantic_score            = row["semantic_score"]
+                existing.assessment_score          = row["assessment_score"]
                 existing.technical_interview_score = row["technical_interview_score"]
-                existing.hr_interview_score = row["hr_interview_score"]
-                existing.weighted_total_score = row["weighted_total_score"]
-                existing.final_rank = row["final_rank"]
-                existing.final_recommendation = row["final_recommendation"]
-                existing.final_status = row["final_status"]
-                existing.red_flag = row["red_flag"]
-                existing.red_flag_reason = row["red_flag_reason"]
+                existing.hr_interview_score        = row["hr_interview_score"]
+                existing.weighted_total_score      = row["weighted_total_score"]
+                existing.final_rank                = row["final_rank"]
+                existing.final_recommendation      = row["final_recommendation"]
+                existing.final_status              = row["final_status"]
+                existing.red_flag                  = row["red_flag"]
+                existing.red_flag_reason           = row["red_flag_reason"]
+                existing.shap_json                 = row.get("shap_json")
+                existing.shap_summary              = row.get("shap_summary")
             else:
                 db.add(FinalRanking(
                     application_id=row["application_id"],
@@ -59,6 +61,8 @@ def persist_rankings_node(state: FinalRankingState) -> FinalRankingState:
                     final_status=row["final_status"],
                     red_flag=row["red_flag"],
                     red_flag_reason=row["red_flag_reason"],
+                    shap_json=row.get("shap_json"),
+                    shap_summary=row.get("shap_summary"),
                 ))
 
         from models.db.job_requisition import JobRequisition

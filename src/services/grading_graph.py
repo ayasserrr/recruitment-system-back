@@ -64,6 +64,10 @@ class GradingState(TypedDict):
     # populated by ai_grader_node
     graded_answers: list[dict]       # + score_awarded, ai_feedback per question
 
+    # populated by ensemble_score_node (open-ended only; MCQ entries unchanged)
+    # Each open-ended graded_answer dict gains: nli_score, semantic_bge_score,
+    # semantic_mpnet_score, roberta_qa_score, tfidf_score, ensemble_score, shap_json
+
     # populated by aggregate_scores_node
     total_score: float
     total_possible: float
@@ -76,6 +80,7 @@ class GradingState(TypedDict):
     weaknesses: str
     ai_feedback: str
     recommendation: str
+    shap_summary: str      # aggregated SHAP narrative across all open-ended answers
 
     error: Optional[str]
 
@@ -415,6 +420,72 @@ def ai_grader_node(state: GradingState) -> GradingState:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Node 2b — Ensemble Scorer (open-ended answers only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ensemble_score_node(state: GradingState) -> GradingState:
+    """
+    Re-scores every open-ended answer with the 5-model ensemble
+    (DeBERTa NLI, BGE, MPNet, RoBERTa QA, TF-IDF) and replaces
+    score_awarded with the ensemble score scaled to question points.
+
+    MCQ answers pass through untouched — their score_awarded (exact match)
+    is already authoritative.
+
+    Adds per-answer keys: nli_score, semantic_bge_score, semantic_mpnet_score,
+    roberta_qa_score, tfidf_score, ensemble_score, shap_json.
+    """
+    try:
+        from services.ensemble_scorer import score_open_answer
+    except ImportError as exc:
+        logger.warning("[ensemble_node] ensemble_scorer not importable: %s — skipping.", exc)
+        return state
+
+    updated: list[dict] = []
+    shap_narratives: list[str] = []
+
+    for g in state["graded_answers"]:
+        if g.get("question_type") != "open_ended":
+            updated.append(g)
+            continue
+
+        candidate_answer = g.get("candidate_answer") or ""
+        result = score_open_answer(
+            question_text     = g.get("question_text", ""),
+            ideal_answer      = g.get("correct_answer", ""),
+            required_keywords = g.get("required_keywords") or [],
+            candidate_answer  = candidate_answer,
+            question_points   = g.get("points", 10),
+        )
+
+        shap_narratives.append(result.get("shap_summary", ""))
+        updated.append({
+            **g,
+            # Replace LLM score with ensemble score for open-ended answers
+            "score_awarded":       result["ensemble_points"],
+            # Ensemble breakdown
+            "nli_score":           result["nli_score"],
+            "semantic_bge_score":  result["semantic_bge_score"],
+            "semantic_mpnet_score":result["semantic_mpnet_score"],
+            "roberta_qa_score":    result["roberta_qa_score"],
+            "tfidf_score":         result["tfidf_score"],
+            "ensemble_score":      result["ensemble_score_01"],
+            "shap_json":           result["shap_json"],
+        })
+
+    open_count = sum(1 for g in updated if g.get("question_type") == "open_ended")
+    logger.info(
+        "[ensemble_node] Assessment %d — %d open-ended answers re-scored with ensemble.",
+        state["assessment_id"], open_count,
+    )
+
+    # Build a cross-answer SHAP summary for the report
+    aggregate_shap = "; ".join(filter(None, shap_narratives[:5]))
+
+    return {**state, "graded_answers": updated, "shap_summary": aggregate_shap}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Node 3 — Aggregate Scores
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -445,11 +516,19 @@ def aggregate_scores_node(state: GradingState) -> GradingState:
 
         for g in graded:
             db.add(AssessmentAnswer(
-                assessment_id=assessment_id,
-                question_id=g["question_id"],
-                candidate_answer=g["candidate_answer"],
-                score_awarded=g["score_awarded"],
-                ai_feedback=g["ai_feedback"],
+                assessment_id        = assessment_id,
+                question_id          = g["question_id"],
+                candidate_answer     = g["candidate_answer"],
+                score_awarded        = g["score_awarded"],
+                ai_feedback          = g["ai_feedback"],
+                # Ensemble columns — populated for open-ended, None for MCQ
+                nli_score            = g.get("nli_score"),
+                semantic_bge_score   = g.get("semantic_bge_score"),
+                semantic_mpnet_score = g.get("semantic_mpnet_score"),
+                roberta_qa_score     = g.get("roberta_qa_score"),
+                tfidf_score          = g.get("tfidf_score"),
+                ensemble_score       = g.get("ensemble_score"),
+                shap_json            = g.get("shap_json"),
             ))
 
         assessment: Optional[CandidateAssessment] = (
@@ -527,21 +606,25 @@ def generate_report_node(state: GradingState) -> GradingState:
             .filter(AssessmentReport.assessment_id == assessment_id)
             .first()
         )
+        shap_summary = state.get("shap_summary", "")
+
         if existing:
             existing.overall_score = total_score
-            existing.ai_feedback = overall_feedback
-            existing.strengths = strengths
-            existing.weaknesses = weaknesses
-            existing.recommendation = recommendation
+            existing.ai_feedback   = overall_feedback
+            existing.strengths     = strengths
+            existing.weaknesses    = weaknesses
+            existing.recommendation= recommendation
+            existing.shap_summary  = shap_summary or existing.shap_summary
             report_id = existing.report_id
         else:
             report = AssessmentReport(
-                assessment_id=assessment_id,
-                overall_score=total_score,
-                ai_feedback=overall_feedback,
-                strengths=strengths,
-                weaknesses=weaknesses,
-                recommendation=recommendation,
+                assessment_id  = assessment_id,
+                overall_score  = total_score,
+                ai_feedback    = overall_feedback,
+                strengths      = strengths,
+                weaknesses     = weaknesses,
+                recommendation = recommendation,
+                shap_summary   = shap_summary,
             )
             db.add(report)
             db.flush()
@@ -642,6 +725,9 @@ def _route_after_load(state: GradingState) -> str:
     return "abort" if state.get("error") else "grade"
 
 def _route_after_grade(state: GradingState) -> str:
+    return "abort" if state.get("error") else "ensemble"
+
+def _route_after_ensemble(state: GradingState) -> str:
     return "abort" if state.get("error") else "aggregate"
 
 def _route_after_aggregate(state: GradingState) -> str:
@@ -653,20 +739,22 @@ def _build_grading_graph():
 
     graph.add_node("load_submission", load_submission_node)
     graph.add_node("ai_grader",       ai_grader_node)
+    graph.add_node("ensemble_score",  ensemble_score_node)   # NEW: multi-model scoring
     graph.add_node("aggregate_scores", aggregate_scores_node)
     graph.add_node("generate_report", generate_report_node)
 
     graph.set_entry_point("load_submission")
 
-    graph.add_conditional_edges("load_submission",  _route_after_load,      {"grade": "ai_grader",       "abort": END})
-    graph.add_conditional_edges("ai_grader",        _route_after_grade,     {"aggregate": "aggregate_scores", "abort": END})
-    graph.add_conditional_edges("aggregate_scores", _route_after_aggregate, {"report": "generate_report", "abort": END})
+    graph.add_conditional_edges("load_submission",  _route_after_load,      {"grade":     "ai_grader",       "abort": END})
+    graph.add_conditional_edges("ai_grader",        _route_after_grade,     {"ensemble":  "ensemble_score",  "abort": END})
+    graph.add_conditional_edges("ensemble_score",   _route_after_ensemble,  {"aggregate": "aggregate_scores","abort": END})
+    graph.add_conditional_edges("aggregate_scores", _route_after_aggregate, {"report":    "generate_report", "abort": END})
     graph.add_edge("generate_report", END)
 
     return graph.compile()
 
 
-_compiled_grading_graph = None
+_compiled_grading_graph = None  # reset forces rebuild when graph changes
 
 
 def run_grading_graph(assessment_id: int, submitted_answers: list[dict]) -> GradingState:
@@ -681,22 +769,23 @@ def run_grading_graph(assessment_id: int, submitted_answers: list[dict]) -> Grad
         _compiled_grading_graph = _build_grading_graph()
 
     initial: GradingState = {
-        "assessment_id": assessment_id,
-        "submitted_answers": submitted_answers,
-        "template_id": None,
-        "passing_score": None,
-        "questions": [],
-        "graded_answers": [],
-        "total_score": 0.0,
-        "total_possible": 0.0,
-        "score_pct": 0.0,
-        "passed": None,
-        "report_id": None,
-        "strengths": "",
-        "weaknesses": "",
-        "ai_feedback": "",
-        "recommendation": "",
-        "error": None,
+        "assessment_id":    assessment_id,
+        "submitted_answers":submitted_answers,
+        "template_id":      None,
+        "passing_score":    None,
+        "questions":        [],
+        "graded_answers":   [],
+        "total_score":      0.0,
+        "total_possible":   0.0,
+        "score_pct":        0.0,
+        "passed":           None,
+        "report_id":        None,
+        "strengths":        "",
+        "weaknesses":       "",
+        "ai_feedback":      "",
+        "recommendation":   "",
+        "shap_summary":     "",   # populated by ensemble_score_node
+        "error":            None,
     }
 
     logger.info("[grading_graph] Starting grading for assessment %d.", assessment_id)
