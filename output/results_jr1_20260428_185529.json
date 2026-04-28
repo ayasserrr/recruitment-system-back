@@ -1,0 +1,894 @@
+{
+  "jr_id": 1,
+  "generated_at": "2026-04-28T18:55:29.099819",
+  "leaderboard": [
+    {
+      "name": "Aya yasser",
+      "candidate_id": 4,
+      "application_id": 4,
+      "assessment_id": 4,
+      "final_score": 0.82,
+      "avg_depth": 0.65,
+      "reject": false,
+      "reject_reason": null,
+      "segment": "\u2705 Human Review",
+      "rank": 1,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.5,
+          "matched_keywords": [
+            "path parameter",
+            "handler function"
+          ],
+          "missing_keywords": [
+            "route",
+            "FastAPI"
+          ],
+          "semantic_recovered": [],
+          "match_count": 2,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Response Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.8,
+          "matched_keywords": [
+            "multi-stage builds"
+          ],
+          "missing_keywords": [
+            "Docker"
+          ],
+          "semantic_recovered": [
+            "image size",
+            "base image",
+            "layers"
+          ],
+          "match_count": 4,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Docker Hub & Registries": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Activity & Lifecycle": {
+          "coverage_score": 1.0,
+          "matched_keywords": [
+            "Activity",
+            "onCreate"
+          ],
+          "missing_keywords": [],
+          "semantic_recovered": [
+            "Android",
+            "initialize",
+            "user interface"
+          ],
+          "match_count": 5,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Jetpack Compose": {
+          "coverage_score": 1.0,
+          "matched_keywords": [
+            "state management",
+            "recomposition"
+          ],
+          "missing_keywords": [],
+          "semantic_recovered": [
+            "Jetpack Compose",
+            "UI components",
+            "performance"
+          ],
+          "match_count": 5,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Kotlin Basics": {
+          "coverage_score": 0.8,
+          "matched_keywords": [
+            "coroutine",
+            "launch"
+          ],
+          "missing_keywords": [
+            "responsive"
+          ],
+          "semantic_recovered": [
+            "Kotlin",
+            "asynchronous"
+          ],
+          "match_count": 4,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": false
+        },
+        "Natural La [External Knowledge]": {
+          "coverage_score": 0.6,
+          "matched_keywords": [
+            "interpret",
+            "human language"
+          ],
+          "missing_keywords": [
+            "Natural Language Processing",
+            "tasks"
+          ],
+          "semantic_recovered": [
+            "understand"
+          ],
+          "match_count": 3,
+          "coverage_norm": 1.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.8,
+          "is_external": true
+        },
+        "sorFlow. [External Knowledge]": {
+          "coverage_score": 0.6,
+          "matched_keywords": [
+            "models"
+          ],
+          "missing_keywords": [
+            "TensorFlow",
+            "neural networks"
+          ],
+          "semantic_recovered": [
+            "machine learning",
+            "training"
+          ],
+          "match_count": 3,
+          "coverage_norm": 1.0,
+          "depth_score": 0.25,
+          "comparative_score": 0.7,
+          "is_external": true
+        },
+        "Computer Visio [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Computer Vision",
+            "autonomous vehicles",
+            "object detection",
+            "recognition",
+            "applications"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.5,
+          "comparative_score": 0.2,
+          "is_external": true
+        }
+      }
+    },
+    {
+      "name": "salma adel",
+      "candidate_id": 3,
+      "application_id": 3,
+      "assessment_id": 3,
+      "final_score": 0.4133,
+      "avg_depth": 0.4333,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.25,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "path parameter",
+            "route",
+            "FastAPI"
+          ],
+          "semantic_recovered": [
+            "handler function"
+          ],
+          "match_count": 1,
+          "coverage_norm": 0.5,
+          "depth_score": 0.5,
+          "comparative_score": 0.5,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Response Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.2,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "image size",
+            "base image",
+            "layers"
+          ],
+          "semantic_recovered": [
+            "multi-stage builds"
+          ],
+          "match_count": 1,
+          "coverage_norm": 0.25,
+          "depth_score": 0.5,
+          "comparative_score": 0.35,
+          "is_external": false
+        },
+        "Docker Hub & Registries": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Activity & Lifecycle": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Android",
+            "Activity",
+            "onCreate",
+            "initialize",
+            "user interface"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Jetpack Compose": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Jetpack Compose",
+            "state management",
+            "UI components",
+            "recomposition",
+            "performance"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Kotlin Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Kotlin",
+            "coroutine",
+            "launch",
+            "asynchronous",
+            "responsive"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Natural La [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Natural Language Processing",
+            "understand",
+            "interpret",
+            "human language",
+            "tasks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "sorFlow. [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "TensorFlow",
+            "machine learning",
+            "training",
+            "models",
+            "neural networks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "Computer Visio [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Computer Vision",
+            "autonomous vehicles",
+            "object detection",
+            "recognition",
+            "applications"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        }
+      }
+    },
+    {
+      "name": "eman mahmoud",
+      "candidate_id": 1,
+      "application_id": 1,
+      "assessment_id": 1,
+      "final_score": 0.3333,
+      "avg_depth": 0.3333,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "path parameter",
+            "handler function",
+            "route",
+            "FastAPI"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Response Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "image size",
+            "multi-stage builds",
+            "base image",
+            "layers"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Docker Hub & Registries": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Activity & Lifecycle": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Android",
+            "Activity",
+            "onCreate",
+            "initialize",
+            "user interface"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Jetpack Compose": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Jetpack Compose",
+            "state management",
+            "UI components",
+            "recomposition",
+            "performance"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Kotlin Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Kotlin",
+            "coroutine",
+            "launch",
+            "asynchronous",
+            "responsive"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Natural La [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Natural Language Processing",
+            "understand",
+            "interpret",
+            "human language",
+            "tasks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "sorFlow. [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "TensorFlow",
+            "machine learning",
+            "training",
+            "models",
+            "neural networks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "Computer Visio [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Computer Vision",
+            "autonomous vehicles",
+            "object detection",
+            "recognition",
+            "applications"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        }
+      }
+    },
+    {
+      "name": "ahmed ayman",
+      "candidate_id": 2,
+      "application_id": 2,
+      "assessment_id": 2,
+      "final_score": 0.3333,
+      "avg_depth": 0.3333,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "path parameter",
+            "handler function",
+            "route",
+            "FastAPI"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Response Models": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Images & Containers": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Dockerfile Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Docker",
+            "image size",
+            "multi-stage builds",
+            "base image",
+            "layers"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Docker Hub & Registries": {
+          "coverage_score": 1.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 1,
+          "coverage_norm": 1.0,
+          "depth_score": 1.0,
+          "comparative_score": 1.0,
+          "is_external": false
+        },
+        "Activity & Lifecycle": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Android",
+            "Activity",
+            "onCreate",
+            "initialize",
+            "user interface"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Jetpack Compose": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Jetpack Compose",
+            "state management",
+            "UI components",
+            "recomposition",
+            "performance"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Kotlin Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Kotlin",
+            "coroutine",
+            "launch",
+            "asynchronous",
+            "responsive"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Natural La [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Natural Language Processing",
+            "understand",
+            "interpret",
+            "human language",
+            "tasks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "sorFlow. [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "TensorFlow",
+            "machine learning",
+            "training",
+            "models",
+            "neural networks"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        },
+        "Computer Visio [External Knowledge]": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "Computer Vision",
+            "autonomous vehicles",
+            "object detection",
+            "recognition",
+            "applications"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": true
+        }
+      }
+    }
+  ],
+  "keyword_gap_report": {
+    "Basic Routes (GET POST PUT DELETE)": [
+      "HTTP method",
+      "POST",
+      "submit",
+      "data"
+    ],
+    "Path & Query Parameters": [
+      "route",
+      "FastAPI"
+    ],
+    "Request Body + Pydantic Models": [
+      "Pydantic",
+      "model",
+      "BaseModel",
+      "request body"
+    ],
+    "Response Models": [
+      "response_model",
+      "serialize",
+      "response data",
+      "FastAPI"
+    ],
+    "Images & Containers": [
+      "Docker",
+      "stop",
+      "running container",
+      "command"
+    ],
+    "Dockerfile Basics": [
+      "Docker"
+    ],
+    "Docker Hub & Registries": [
+      "Docker",
+      "push",
+      "image",
+      "Docker Hub"
+    ],
+    "Activity & Lifecycle": "all covered",
+    "Jetpack Compose": "all covered",
+    "Kotlin Basics": [
+      "responsive"
+    ],
+    "Natural La [External Knowledge]": [
+      "Natural Language Processing",
+      "tasks"
+    ],
+    "sorFlow. [External Knowledge]": [
+      "TensorFlow",
+      "neural networks"
+    ],
+    "Computer Visio [External Knowledge]": [
+      "Computer Vision",
+      "autonomous vehicles",
+      "object detection",
+      "recognition",
+      "applications"
+    ]
+  }
+}

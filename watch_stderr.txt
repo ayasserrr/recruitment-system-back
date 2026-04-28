@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "E:\OneDrive\Desktop\recruitment-system-back\watch_pipeline.py", line 2, in <module>
+    import psycopg2
+ModuleNotFoundError: No module named 'psycopg2'

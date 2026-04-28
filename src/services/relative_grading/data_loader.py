@@ -47,8 +47,10 @@ def load_concepts(jr_id: int, db: Session) -> list[dict]:
 
     concepts: list[dict] = []
     for q in questions:
+        is_mcq = (q.question_type or "").lower() == "mcq"
         kws = q.required_keywords
-        if not isinstance(kws, list) or not kws:
+        # MCQs have no required_keywords — that's fine, they use score_awarded directly
+        if not is_mcq and (not isinstance(kws, list) or not kws):
             logger.warning(
                 "[data_loader] concept '%s' (jr=%d) has no required_keywords — skipping.",
                 q.concept_name, jr_id,
@@ -59,9 +61,10 @@ def load_concepts(jr_id: int, db: Session) -> list[dict]:
             "tool_name": q.tool_name,
             "level": q.level,
             "question_text": q.question_text,
-            "required_keywords": [str(k) for k in kws],
+            "required_keywords": [str(k) for k in kws] if isinstance(kws, list) else [],
             "template_question_id": q.template_question_id,
             "generated_question_id": q.id,
+            "question_type": q.question_type or "open_ended",
             # concept_id is NULL for external knowledge questions (no DB match)
             "is_external": q.concept_id is None,
         })
@@ -108,10 +111,16 @@ def load_candidates(jr_id: int, db: Session) -> list[dict]:
             .filter(AssessmentAnswer.assessment_id == assessment.assessment_id)
             .all()
         )
-        # Map: template_question_id (int) → answer text
+        # Map: template_question_id → answer text
         answers: dict[int, str] = {
             a.question_id: (a.candidate_answer or "")
             for a in answer_rows
+        }
+        # Map: template_question_id → pre-computed score_awarded (for MCQs)
+        mcq_scores: dict[int, float] = {
+            a.question_id: float(a.score_awarded)
+            for a in answer_rows
+            if a.score_awarded is not None
         }
         candidates.append({
             "name": f"{candidate.first_name} {candidate.last_name}".strip(),
@@ -119,6 +128,7 @@ def load_candidates(jr_id: int, db: Session) -> list[dict]:
             "application_id": app.application_id,
             "assessment_id": assessment.assessment_id,
             "answers": answers,
+            "mcq_scores": mcq_scores,
         })
 
     logger.info(

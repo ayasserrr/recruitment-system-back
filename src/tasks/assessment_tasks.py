@@ -405,7 +405,7 @@ def scan_and_dispatch_assessment_ranking() -> dict:
     max_retries=2,
     default_retry_delay=120,
 )
-def process_assessment_ranking(self, requisition_id: int) -> dict:
+def process_assessment_ranking(self, requisition_id: int = None, assessment_id: int = None) -> dict:
     """
     Worker task — runs post-deadline graph after assessment deadline passes.
 
@@ -414,6 +414,12 @@ def process_assessment_ranking(self, requisition_id: int) -> dict:
     3. On success → set jr.status = 'assessment_ranked', release lock
     4. Dispatch run_relative_grading
     """
+    # assessment_id is an old kwarg name kept for backward-compat with queued tasks
+    if requisition_id is None and assessment_id is not None:
+        requisition_id = assessment_id
+    if requisition_id is None:
+        logger.error("[ranking_worker] Called with no requisition_id — skipping.")
+        return {"skipped": True, "reason": "no_requisition_id"}
     logger.info("[ranking_worker] Starting post-deadline processing for JR %d.", requisition_id)
 
     acquired = acquire_jr_lock(requisition_id)

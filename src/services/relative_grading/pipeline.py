@@ -228,16 +228,39 @@ def run_pipeline(
     # covered_kws_by_concept[concept_name] = set of keywords covered by at least one candidate
     covered_kws_by_concept: dict[str, set[str]] = {}
 
+    # MCQ max points per question (score_awarded scale is 0–10)
+    _MCQ_MAX = 10.0
+
     for concept in concepts:
         cname = concept["concept_name"]
         q_text = concept["question_text"]
         req_kws = concept["required_keywords"]
         tq_id = concept["template_question_id"]
+        is_mcq = concept.get("question_type", "open_ended").lower() == "mcq"
 
         concept_results[cname] = {}
         covered_kws_by_concept[cname] = set()
 
-        # ── Phase 1 for every candidate ──────────────────────────────────────
+        if is_mcq:
+            # ── MCQ: use pre-computed score_awarded, skip P1/P2 entirely ─────
+            for cand in candidates:
+                raw = cand.get("mcq_scores", {}).get(tq_id, 0.0)
+                norm = round(min(raw / _MCQ_MAX, 1.0), 4)
+                concept_results[cname][cand["name"]] = {
+                    "phase1": {"score": norm, "matched": [], "missing": [],
+                               "semantic_recovered": [], "match_count": int(norm)},
+                    "answer": cand["answers"].get(tq_id, ""),
+                    "depth_score": norm,        # MCQ depth = correctness
+                    "coverage_norm": norm,
+                    "comparative_score": norm,
+                }
+                logger.info(
+                    "[MCQ] %s | %s score_awarded=%.1f → norm=%.2f",
+                    cand["name"], cname, raw, norm,
+                )
+            continue  # skip P1/P2 loop below
+
+        # ── Phase 1 for every candidate (open-ended only) ────────────────────
         for cand in candidates:
             answer_text = cand["answers"].get(tq_id, "")
             p1 = phase1_score(
