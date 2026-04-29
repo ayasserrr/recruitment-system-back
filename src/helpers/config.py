@@ -40,6 +40,7 @@ class settings(BaseSettings):
     LIVEKIT_API_SECRET: str = ""
     LIVEKIT_WEBHOOK_SECRET: str = ""   # same as API_SECRET for signature validation
     LIVEKIT_AGENT_NAME: str = "interview-agent"
+    LIVEKIT_HR_AGENT_NAME: str = "interview-agent"  # override in .env to use a separate HR agent worker
     PORT: int = 8787
 
     model_config = SettingsConfigDict(

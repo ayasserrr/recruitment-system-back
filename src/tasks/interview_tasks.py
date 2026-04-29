@@ -381,6 +381,7 @@ def send_hr_interview_invitations(self, requisition_id: int) -> dict:
             return {"requisition_id": requisition_id, "sent": 0, "skipped": False}
 
         cfg = get_settings()
+        base_url = cfg.APP_BASE_URL.rstrip("/")
         deadline_dt = datetime.utcnow() + timedelta(days=_HR_INTERVIEW_DEADLINE_DAYS)
         deadline_str = deadline_dt.strftime("%B %d, %Y at %H:%M UTC")
         job_title = jr.job_title
@@ -420,10 +421,15 @@ def send_hr_interview_invitations(self, requisition_id: int) -> dict:
                 scheduled_at=deadline_dt,
             )
             db.add(hr_session)
+            interview_url = (
+                f"{base_url}/hr-interview"
+                f"?requisition_id={requisition_id}&candidate_id={candidate.candidate_id}"
+            )
             recipients.append((
                 candidate.candidate_id,
                 candidate.email,
                 candidate.first_name or "Candidate",
+                interview_url,
             ))
 
         db.commit()
@@ -439,12 +445,13 @@ def send_hr_interview_invitations(self, requisition_id: int) -> dict:
     sent, failed = 0, 0
     for batch_start in range(0, len(recipients), _BATCH_SIZE):
         batch = recipients[batch_start: batch_start + _BATCH_SIZE]
-        for candidate_id, email, first_name in batch:
+        for candidate_id, email, first_name, interview_url in batch:
             success = send_hr_interview_invitation_sync(
                 recipient_email=email,
                 first_name=first_name,
                 job_title=job_title,
                 interview_deadline=deadline_str,
+                interview_url=interview_url,
             )
             if success:
                 sent += 1

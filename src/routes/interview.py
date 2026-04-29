@@ -16,6 +16,7 @@ from database.connection import SessionLocal, get_db
 from helpers.config import get_settings
 from models.db.application import Application
 from models.db.candidate import Candidate
+from models.db.hr_interview_session import HRInterviewSession
 from models.db.job_posting import JobPosting
 from models.db.job_requisition import JobRequisition
 from models.db.technical_interview_session import TechnicalInterviewSession
@@ -288,6 +289,120 @@ def mark_interview_completed(
             logger.warning("[interview/complete] Final ranking dispatch failed: %s", exc)
 
     return {"status": "completed", "session_id": session_id}
+
+
+# ── POST /hr-interviews/start ─────────────────────────────────────────────────
+
+@router.post("/hr/start", response_model=InterviewStartResponse)
+async def start_hr_interview(
+    request: InterviewStartRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Activate the AI HR interview session for a candidate:
+
+    1. Look up the existing HRInterviewSession for this application.
+    2. Assign a room_name, mark status='Active'.
+    3. Build room metadata with mode='hr' so the LiveKit agent uses HR prompts.
+    4. Generate a signed LiveKit participant token.
+    5. Create the LiveKit room and dispatch the AI agent.
+    6. Return the token so the frontend can join.
+    """
+    settings = get_settings()
+
+    application: Optional[Application] = (
+        db.query(Application)
+        .filter(Application.application_id == request.application_id)
+        .first()
+    )
+    if not application:
+        raise HTTPException(status_code=404, detail="Application not found.")
+
+    candidate: Candidate = application.candidate
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+
+    session_row: Optional[HRInterviewSession] = (
+        db.query(HRInterviewSession)
+        .filter(HRInterviewSession.application_id == request.application_id)
+        .first()
+    )
+    if not session_row:
+        raise HTTPException(
+            status_code=404,
+            detail="No HR interview session found. The HR invitation must be sent first.",
+        )
+
+    if session_row.status == "Completed":
+        raise HTTPException(status_code=400, detail="This HR interview has already been completed.")
+
+    if session_row.overall_score is None:
+        session_row.overall_score = 0.0
+
+    room_name = session_row.room_name
+    if not room_name:
+        room_name = f"hr-interview-{session_row.session_id}"
+        session_row.room_name = room_name
+
+    session_row.status = "Active"
+    session_row.started_at = datetime.utcnow()
+    db.commit()
+    db.refresh(session_row)
+
+    posting: Optional[JobPosting] = (
+        db.query(JobPosting)
+        .filter(JobPosting.posting_id == application.posting_id)
+        .first()
+    )
+    jr: Optional[JobRequisition] = (
+        db.query(JobRequisition)
+        .filter(JobRequisition.requisition_id == posting.requisition_id)
+        .first()
+    ) if posting else None
+
+    job_title = jr.job_title if jr and jr.job_title else "the position"
+    job_responsibilities = jr.key_responsibilities or "" if jr else ""
+    candidate_name = f"{candidate.first_name or ''} {candidate.last_name or ''}".strip() or "Candidate"
+    requisition_id = jr.requisition_id if jr else 0
+
+    room_metadata = json.dumps({
+        "session_id": session_row.session_id,
+        "application_id": request.application_id,
+        "candidate_name": candidate_name,
+        "job_title": job_title,
+        "requisition_id": requisition_id,
+        "mode": "hr",
+        "job_responsibilities": job_responsibilities,
+    })
+
+    livekit_token = _generate_livekit_token(
+        api_key=settings.LIVEKIT_API_KEY,
+        api_secret=settings.LIVEKIT_API_SECRET,
+        room_name=room_name,
+        participant_identity=f"candidate_{request.application_id}",
+        participant_name=candidate_name,
+    )
+
+    try:
+        await _create_room_and_dispatch_agent(
+            livekit_url=settings.LIVEKIT_URL,
+            api_key=settings.LIVEKIT_API_KEY,
+            api_secret=settings.LIVEKIT_API_SECRET,
+            room_name=room_name,
+            room_metadata=room_metadata,
+            agent_name=settings.LIVEKIT_AGENT_NAME,
+        )
+    except Exception as exc:
+        logger.error("[hr-interview/start] Failed to create room or dispatch agent: %s", exc)
+        raise HTTPException(status_code=502, detail=f"LiveKit infrastructure error: {exc}")
+
+    return InterviewStartResponse(
+        session_id=session_row.session_id,
+        livekit_room_name=room_name,
+        livekit_token=livekit_token,
+        status="Active",
+        message=f"HR interview room '{room_name}' is ready. The AI HR interviewer will join shortly.",
+    )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

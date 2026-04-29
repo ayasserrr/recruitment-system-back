@@ -49,7 +49,9 @@ from typing import Optional
 from livekit.agents import (
     Agent,
     AgentSession,
+    AutoSubscribe,
     JobContext,
+    RoomInputOptions,
     WorkerOptions,
     cli,
     function_tool,
@@ -58,15 +60,17 @@ from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
 
 from database.connection import SessionLocal
+from models.db.hr_interview_session import HRInterviewSession
 from models.db.technical_interview_session import TechnicalInterviewSession
 
 logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SILENCE_NUDGE_SECONDS = 10          # candidate silence threshold before nudge
-SILENCE_CHECK_INTERVAL = 3         # watchdog tick (seconds)
+SILENCE_NUDGE_SECONDS = 25          # candidate silence threshold before nudge
+SILENCE_CHECK_INTERVAL = 5         # watchdog tick (seconds)
 POST_CLOSE_GRACE_SECONDS = 3       # wait after TTS before disconnecting
+STARTUP_GRACE_SECONDS   = 40       # silence watchdog is inactive for this long at startup
 
 
 # ── System prompt builder ─────────────────────────────────────────────────────
@@ -78,7 +82,11 @@ def _build_system_prompt(
 ) -> str:
     numbered = "\n".join(f"  Q{i+1}: {q}" for i, q in enumerate(questions))
     return f"""You are a professional AI technical interviewer conducting a structured \
-interview for the {job_title} role at a leading technology company.
+LIVE VOICE interview for the {job_title} role at a leading technology company.
+
+IMPORTANT: This is a real-time AUDIO/VOICE conversation. The candidate SPEAKS their \
+answers aloud — you will hear their voice through the microphone. Do NOT ask them to \
+type, write, or submit anything. Simply ask your question and wait quietly for them to speak.
 
 You are speaking with: {candidate_name}
 
@@ -118,8 +126,11 @@ Have a great day, goodbye!"
 • Be professional, warm, and encouraging throughout.
 • Do NOT reveal scores, rankings, or comparisons to the candidate.
 • Do NOT ask follow-up questions beyond clarifying pauses.
-• If the candidate is silent for more than 10 seconds, they will receive an \
-automated prompt — you do not need to handle silence yourself.
+• If the candidate says "end the interview", "stop the interview", "I want to finish", \
+or anything that clearly requests ending the session, immediately deliver the closing \
+farewell phrase and call end_interview() — do not continue with remaining questions.
+• If the candidate is silent, simply wait — an automated nudge will be sent after \
+a period of silence. You do not need to handle silence yourself.
 • Keep transitions between questions smooth and natural.
 """
 
@@ -140,21 +151,28 @@ class RecruitmentInterviewAgent(Agent):
         questions: list[str],
         requisition_id: int,
         ctx: JobContext,
+        mode: str = "technical",
+        job_responsibilities: str = "",
     ) -> None:
         self._db_session_id = db_session_id
         self._candidate_name = candidate_name
         self._job_title = job_title
         self._questions = questions
         self._requisition_id = requisition_id
-        self._ctx = ctx                          # used for server-side disconnect
+        self._ctx = ctx
+        self._mode = mode
+        self._job_responsibilities = job_responsibilities
 
         self._mini_scores: list[float] = []
-        self._transcript_parts: list[str] = []   # ["Agent: ...", "Candidate: ..."]
+        self._transcript_parts: list[str] = []
         self._interview_done = False
-        self._last_speech_time: float = time.monotonic()
+        # Pre-offset so the watchdog never fires during the startup greeting.
+        # Effective first-nudge window starts STARTUP_GRACE_SECONDS after __init__.
+        self._last_speech_time: float = time.monotonic() + STARTUP_GRACE_SECONDS
 
+        prompt_builder = _build_hr_system_prompt if mode == "hr" else _build_system_prompt
         super().__init__(
-            instructions=_build_system_prompt(candidate_name, job_title, questions),
+            instructions=prompt_builder(candidate_name, job_title, questions),
         )
 
     # ── Function tools (callable by the LLM during conversation) ─────────────
@@ -215,17 +233,31 @@ class RecruitmentInterviewAgent(Agent):
         transcript = "\n\n".join(self._transcript_parts)
         summary = self._build_summary(overall)
 
-        # Run the DB write in a thread so the event loop stays responsive
-        # while SQLAlchemy commits.  Disconnect still fires even if persist fails.
         try:
-            await asyncio.to_thread(
-                _persist_completion,
-                db_session_id=self._db_session_id,
-                overall_score=overall,
-                summary=summary,
-                transcript=transcript,
-                requisition_id=self._requisition_id,
-            )
+            if self._mode == "hr":
+                await asyncio.to_thread(
+                    _persist_completion_hr,
+                    db_session_id=self._db_session_id,
+                    overall_score=overall,
+                    summary=summary,
+                    transcript=transcript,
+                    requisition_id=self._requisition_id,
+                    job_title=self._job_title,
+                    job_responsibilities=self._job_responsibilities,
+                    candidate_name=self._candidate_name,
+                )
+            else:
+                await asyncio.to_thread(
+                    _persist_completion,
+                    db_session_id=self._db_session_id,
+                    overall_score=overall,
+                    summary=summary,
+                    transcript=transcript,
+                    requisition_id=self._requisition_id,
+                    job_title=self._job_title,
+                    job_responsibilities=self._job_responsibilities,
+                    candidate_name=self._candidate_name,
+                )
         except Exception:
             logger.exception(
                 "[agent] Persistence failed for session %d — disconnecting anyway.",
@@ -238,10 +270,12 @@ class RecruitmentInterviewAgent(Agent):
             overall,
         )
 
-        # Allow TTS to finish delivering the farewell phrase, then close the
-        # room from the server side via ctx.disconnect().
+        # Allow TTS to finish delivering the farewell phrase, then close the room.
         await asyncio.sleep(POST_CLOSE_GRACE_SECONDS)
-        await self._ctx.disconnect()
+        try:
+            await self._ctx.room.disconnect()
+        except Exception as exc:
+            logger.debug("[agent] Room disconnect after interview: %s", exc)
 
         return "Interview finalised and results persisted."
 
@@ -326,7 +360,7 @@ async def entrypoint(ctx: JobContext) -> None:
     Each interview room gets one invocation of this function.
     """
     logger.info("[agent-worker] Job dispatched — room: %s", ctx.room.name)
-    await ctx.connect()
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     # ── Parse room metadata ───────────────────────────────────────────────────
     metadata: dict = {}
@@ -344,6 +378,8 @@ async def entrypoint(ctx: JobContext) -> None:
     candidate_name: str = metadata.get("candidate_name", "Candidate")
     job_title: str = metadata.get("job_title", "the position")
     requisition_id: int = metadata.get("requisition_id", 0)
+    mode: str = metadata.get("mode", "technical")
+    job_responsibilities: str = metadata.get("job_responsibilities", "")
 
     if not db_session_id:
         logger.error(
@@ -352,10 +388,13 @@ async def entrypoint(ctx: JobContext) -> None:
         )
         return
 
-    # ── Load personalised questions ───────────────────────────────────────────
-    questions = await asyncio.to_thread(
-        _load_questions_sync, application_id, job_title
-    )
+    # ── Load questions based on mode ──────────────────────────────────────────
+    if mode == "hr":
+        questions = await asyncio.to_thread(_load_hr_questions_sync, application_id, job_title)
+    else:
+        questions = await asyncio.to_thread(_load_questions_sync, application_id, job_title)
+
+    logger.info("[agent-worker] mode=%s | session=%d | %d questions loaded.", mode, db_session_id, len(questions))
 
     # ── Build agent + session ─────────────────────────────────────────────────
     agent = RecruitmentInterviewAgent(
@@ -365,6 +404,8 @@ async def entrypoint(ctx: JobContext) -> None:
         questions=questions,
         requisition_id=requisition_id,
         ctx=ctx,
+        mode=mode,
+        job_responsibilities=job_responsibilities,
     )
 
     session = AgentSession(
@@ -378,12 +419,28 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # ── Track speech for silence watchdog ─────────────────────────────────────
+    _END_PHRASES = frozenset({
+        "end the interview", "end interview", "stop the interview",
+        "stop interview", "finish the interview", "finish interview",
+        "i want to end", "i want to stop", "i want to finish",
+        "that's all", "thats all",
+    })
+
     @session.on("user_speech_committed")
     def _on_user_speech(event) -> None:
         agent._last_speech_time = time.monotonic()
         text = getattr(event, "transcript", "") or ""
-        if text.strip():
-            agent._transcript_parts.append(f"Candidate: {text.strip()}")
+        if not text.strip():
+            return
+        agent._transcript_parts.append(f"Candidate: {text.strip()}")
+        # Programmatic end — if the LLM doesn't react in time, force the close.
+        lower = text.lower().strip()
+        if any(phrase in lower for phrase in _END_PHRASES) and not agent._interview_done:
+            logger.info(
+                "[agent] Candidate requested end via speech — force-ending session %d.",
+                agent._db_session_id,
+            )
+            asyncio.create_task(agent.end_interview(), name="force-end-interview")
 
     @session.on("agent_speech_committed")
     def _on_agent_speech(event) -> None:
@@ -405,8 +462,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 name="candidate-disconnect",
             )
 
-    await session.start(ctx.room, agent=agent)
-    await session.wait_for_shutdown()
+    await session.start(
+        agent,
+        room=ctx.room,
+        room_input_options=RoomInputOptions(audio_enabled=True),
+    )
+    await session.wait_for_inactive()
 
 
 async def _handle_candidate_disconnect(ctx: JobContext, agent: "RecruitmentInterviewAgent") -> None:
@@ -433,12 +494,16 @@ async def _handle_candidate_disconnect(ctx: JobContext, agent: "RecruitmentInter
     )
     agent._interview_done = True  # stop silence watchdog and auto-end
 
+    persist_no_show_fn = _persist_no_show_hr if agent._mode == "hr" else _persist_no_show
     await asyncio.to_thread(
-        _persist_no_show,
+        persist_no_show_fn,
         db_session_id=agent._db_session_id,
         requisition_id=agent._requisition_id,
     )
-    await ctx.disconnect()
+    try:
+        await ctx.room.disconnect()
+    except Exception as exc:
+        logger.debug("[agent] Room disconnect after no-show: %s", exc)
 
 
 # ── Helper: load personalised questions ──────────────────────────────────────
@@ -496,6 +561,90 @@ def _generic_questions(job_title: str) -> list[str]:
     ]
 
 
+# ── HR mode: system prompt and questions ─────────────────────────────────────
+
+def _build_hr_system_prompt(
+    candidate_name: str,
+    job_title: str,
+    questions: list[str],
+) -> str:
+    numbered = "\n".join(f"  Q{i+1}: {q}" for i, q in enumerate(questions))
+    return f"""You are a warm, professional AI HR interviewer conducting a structured \
+LIVE VOICE behavioral interview for the {job_title} role.
+
+IMPORTANT: This is a real-time AUDIO/VOICE conversation. The candidate SPEAKS their \
+answers aloud — you will hear their voice through the microphone. Do NOT ask them to \
+type, write, or submit anything. Simply ask your question and wait quietly for them to speak.
+
+You are speaking with: {candidate_name}
+
+━━━  STRICT INTERVIEW STRUCTURE  ━━━
+
+STEP 1 — GREETING (once, at the very start):
+  "Hello {candidate_name}, I'm your HR interviewer for the {job_title} position. \
+It's wonderful to have you here today. I'll be asking you a few questions about your \
+experiences and working style."
+
+STEP 2 — WARM-UP (one question):
+  Ask: "To start, could you briefly tell me about yourself and what drew you to this role?"
+  Acknowledge their answer warmly (e.g., "That's great to hear, thank you."), \
+then transition: "Let's move into some situational questions."
+
+STEP 3 — BEHAVIORAL QUESTIONS (exactly 5, in the order shown, one at a time):
+{numbered}
+
+  Protocol for each question:
+  - Ask the question clearly and wait for the full answer.
+  - Encourage specific examples if the answer is vague: \
+"Could you walk me through a specific situation where that happened?"
+  - Once they finish, call `record_answer_score` with the question number (1–5), \
+your score (0–100), and a one-sentence rationale.
+  - Score based on: specificity of the situation, clarity of their actions, \
+self-awareness, communication quality, and reflection on outcomes.
+  - Then ask the next question.
+  - NEVER skip or repeat questions.
+
+STEP 4 — CLOSING (after Q5 answer + `record_answer_score(5, …)` call):
+  Say EXACTLY this phrase:
+  "Thank you so much for your time, {candidate_name}. That concludes our HR interview. \
+We'll review everything and be in touch with next steps very soon. \
+Have a wonderful day, goodbye!"
+  Immediately call `end_interview` after delivering this phrase.
+
+━━━  BEHAVIOURAL RULES  ━━━
+• Be warm, empathetic, and encouraging throughout.
+• Focus exclusively on soft skills: communication, teamwork, leadership, \
+adaptability, initiative, and problem-solving.
+• Do NOT ask any technical questions.
+• Do NOT reveal scores, decisions, or comparisons to the candidate.
+• If the candidate says "end the interview", "stop the interview", "I want to finish", \
+or anything that clearly requests ending the session, immediately deliver the closing \
+farewell phrase and call end_interview() — do not continue with remaining questions.
+• If the candidate is silent, simply wait — an automated nudge will be sent after \
+a period of silence. You do not need to handle silence yourself.
+"""
+
+
+def _hr_generic_questions(job_title: str) -> list[str]:
+    return [
+        "Tell me about a time you faced a significant challenge at work. \
+How did you approach it and what was the outcome?",
+        "Describe a situation where you had to collaborate closely with a difficult \
+team member. How did you handle it and what did you learn?",
+        "Give me an example of a time you had to adapt quickly to a major unexpected \
+change. What did you do and what was the result?",
+        "Tell me about a time you took initiative to improve a process or solve a \
+problem without being asked. What motivated you and what impact did it have?",
+        "Describe a situation where you had to manage multiple competing priorities \
+under pressure. How did you stay organised and what was the outcome?",
+    ]
+
+
+def _load_hr_questions_sync(application_id: Optional[int], job_title: str) -> list[str]:
+    """Returns behavioral HR questions. Extendable to load personalised questions from DB."""
+    return _hr_generic_questions(job_title)
+
+
 # ── Helper: persist final results to DB ──────────────────────────────────────
 
 def _persist_completion(
@@ -504,11 +653,15 @@ def _persist_completion(
     summary: str,
     transcript: str,
     requisition_id: int,
+    job_title: str = "",
+    job_responsibilities: str = "",
+    candidate_name: str = "Candidate",
 ) -> None:
     """
-    Updates TechnicalInterviewSession to Completed and triggers final ranking.
-    Runs synchronously (called from an async context via direct call;
-    DB operations are fast so blocking is acceptable here).
+    Updates TechnicalInterviewSession to Completed.
+    Runs 4-model ensemble scoring on the transcript; the ensemble composite
+    score (0-100) replaces the LLM-reported overall_score so grading is not
+    dependent on the LLM's self-assessment.
     """
     db = SessionLocal()
     try:
@@ -524,19 +677,46 @@ def _persist_completion(
             )
             return
 
+        # ── Run 4-model ensemble scoring ──────────────────────────────────────
+        final_score = overall_score  # LLM score as fallback
+        try:
+            from services.tech_analysis_service import score_transcript as tech_score_transcript
+            tech_scores = tech_score_transcript(
+                transcript=transcript,
+                job_title=job_title,
+                job_responsibilities=job_responsibilities,
+                candidate_name=candidate_name,
+            )
+            ensemble_score = tech_scores.get("overall_score_100", overall_score)
+            final_score = ensemble_score  # ensemble overrides LLM score
+            row.codebert_score        = tech_scores.get("codebert_score")
+            row.roberta_depth_score   = tech_scores.get("roberta_depth_score")
+            row.nli_technical_score   = tech_scores.get("nli_technical_score")
+            row.tfidf_technical_score = tech_scores.get("tfidf_technical_score")
+            row.shap_json             = tech_scores.get("shap_json")
+            row.shap_summary          = tech_scores.get("shap_summary")
+            logger.info(
+                "[agent-worker] Tech ensemble score=%.2f (LLM was %.2f) for session %d.",
+                ensemble_score, overall_score, db_session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[agent-worker] Tech ensemble scoring failed — falling back to LLM score: %s", exc
+            )
+
         row.status = "Completed"
-        row.overall_score = overall_score
-        row.overall_performance = _tier_label(overall_score)
-        row.recommendation = _recommendation(overall_score)
+        row.overall_score = final_score
+        row.overall_performance = _tier_label(final_score)
+        row.recommendation = _recommendation(final_score)
         row.summary = summary
-        row.transcript = transcript          # column added in migration h2i3j4k5l6m7
+        row.transcript = transcript
         row.ended_at = datetime.utcnow()
         db.commit()
 
         logger.info(
             "[agent-worker] Persisted Completed for session %d (score=%.2f).",
             db_session_id,
-            overall_score,
+            final_score,
         )
 
     except Exception:
@@ -595,6 +775,106 @@ def _persist_no_show(db_session_id: int, requisition_id: int) -> None:
                 "[agent-worker] Could not dispatch final ranking after no-show (JR %d): %s",
                 requisition_id, exc,
             )
+
+
+def _persist_completion_hr(
+    db_session_id: int,
+    overall_score: float,
+    summary: str,
+    transcript: str,
+    requisition_id: int,
+    job_title: str,
+    job_responsibilities: str,
+    candidate_name: str,
+) -> None:
+    """Updates HRInterviewSession to Completed, runs ensemble scoring, triggers final ranking."""
+    db = SessionLocal()
+    try:
+        row: Optional[HRInterviewSession] = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.session_id == db_session_id)
+            .first()
+        )
+        if not row:
+            logger.error("[agent-worker] HRInterviewSession %d not found — cannot persist.", db_session_id)
+            return
+
+        row.status = "Completed"
+        row.overall_score = overall_score
+        row.overall_performance = _tier_label(overall_score)
+        row.recommendation = _recommendation(overall_score)
+        row.summary = summary
+        row.transcript = transcript
+        row.ended_at = datetime.utcnow()
+        db.commit()
+
+        logger.info("[agent-worker] HR session %d persisted (score=%.2f).", db_session_id, overall_score)
+
+        # Run 4-model ensemble scoring on the transcript
+        try:
+            from services.hr_analysis_service import score_transcript
+            scores = score_transcript(
+                transcript=transcript,
+                job_title=job_title,
+                job_responsibilities=job_responsibilities,
+                candidate_name=candidate_name,
+            )
+            row.emotion_score = scores.get("emotion_score")
+            row.sentiment_score = scores.get("sentiment_score")
+            row.nli_align_score = scores.get("nli_align_score")
+            row.semantic_depth_score = scores.get("semantic_depth_score")
+            row.shap_json = scores.get("shap_json")
+            row.shap_summary = scores.get("shap_summary")
+            db.commit()
+            logger.info("[agent-worker] HR ensemble scores saved for session %d.", db_session_id)
+        except Exception as exc:
+            logger.warning("[agent-worker] HR ensemble scoring failed for session %d: %s", db_session_id, exc)
+
+    except Exception:
+        db.rollback()
+        logger.exception("[agent-worker] DB error while persisting HR session %d.", db_session_id)
+    finally:
+        db.close()
+
+    if requisition_id:
+        try:
+            from tasks.interview_tasks import maybe_dispatch_final_ranking_after_hr
+            maybe_dispatch_final_ranking_after_hr.delay(requisition_id)
+        except Exception as exc:
+            logger.warning("[agent-worker] Could not dispatch final ranking after HR (JR %d): %s", requisition_id, exc)
+
+
+def _persist_no_show_hr(db_session_id: int, requisition_id: int) -> None:
+    """Mark the HR session No-show when the candidate abandons mid-interview."""
+    db = SessionLocal()
+    try:
+        row: Optional[HRInterviewSession] = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.session_id == db_session_id)
+            .first()
+        )
+        if not row:
+            return
+        if row.status in ("Completed", "No-show", "Cancelled"):
+            return
+        row.status = "No-show"
+        row.overall_score = 0.0
+        row.ended_at = datetime.utcnow()
+        row.summary = "Candidate disconnected before completing the HR interview."
+        db.commit()
+        logger.info("[agent-worker] HR session %d marked No-show.", db_session_id)
+    except Exception:
+        db.rollback()
+        logger.exception("[agent-worker] DB error marking no-show for HR session %d.", db_session_id)
+    finally:
+        db.close()
+
+    if requisition_id:
+        try:
+            from tasks.interview_tasks import maybe_dispatch_final_ranking_after_hr
+            maybe_dispatch_final_ranking_after_hr.delay(requisition_id)
+        except Exception as exc:
+            logger.warning("[agent-worker] Could not dispatch final ranking after HR no-show (JR %d): %s", requisition_id, exc)
 
 
 def _tier_label(score: float) -> str:

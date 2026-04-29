@@ -160,7 +160,7 @@ class FocusedInterviewerPersona:
             
             # Get job requisition for role information
             job_req = db.query(JobRequisition).filter(
-                JobRequisition.requisition_id == application.requisition_id
+                JobRequisition.requisition_id == application.posting.requisition_id
             ).first()
             
             # Get candidate projects
@@ -178,8 +178,8 @@ class FocusedInterviewerPersona:
                         "project_name": proj.project_name,
                         "description": proj.description,
                         "tech_stack": proj.tech_stack.split(", ") if proj.tech_stack else [],
-                        "role": proj.role or "Developer",
-                        "duration": proj.duration_months or 0
+                        "role": getattr(proj, 'role', None) or "Developer",
+                        "duration": getattr(proj, 'duration_months', None) or 0
                     })
             
             # Get candidate experiences

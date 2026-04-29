@@ -61,6 +61,9 @@ from models.db.cv_skill import CVSkill
 from models.db.job_posting import JobPosting
 from models.db.job_requisition import JobRequisition
 from models.db.semantic_analysis_report import SemanticAnalysisReport
+from models.db.hr_interview_config import HRInterviewConfig
+from models.db.hr_interview_report import HRInterviewReport
+from models.db.hr_interview_session import HRInterviewSession
 from models.db.technical_interview_config import TechnicalInterviewConfig
 from models.db.technical_interview_report import TechnicalInterviewReport
 from models.db.technical_interview_session import TechnicalInterviewSession
@@ -238,6 +241,25 @@ def _build_projects_list(cv: CandidateCV) -> list[dict]:
     ]
 
 
+def _get_or_create_hr_interview_config(requisition_id: int, db: Session) -> HRInterviewConfig:
+    config = (
+        db.query(HRInterviewConfig)
+        .filter(HRInterviewConfig.requisition_id == requisition_id)
+        .first()
+    )
+    if not config:
+        config = HRInterviewConfig(
+            requisition_id=requisition_id,
+            interview_type="AI HR",
+            duration_minutes=45,
+            scoring_system="1-10",
+            candidates_to_advance=10,
+        )
+        db.add(config)
+        db.flush()
+    return config
+
+
 def _get_or_create_interview_config(requisition_id: int, db: Session) -> TechnicalInterviewConfig:
     config = (
         db.query(TechnicalInterviewConfig)
@@ -258,7 +280,7 @@ def _get_or_create_interview_config(requisition_id: int, db: Session) -> Technic
     return config
 
 
-async def _create_livekit_room(room_name: str, metadata: dict) -> None:
+async def _create_livekit_room(room_name: str, metadata: dict, agent_name: str | None = None) -> None:
     """
     Create a LiveKit room on the server and embed metadata, then dispatch the AI agent.
     Metadata is read by the Voice Agent on room entry to personalise the interview.
@@ -292,14 +314,15 @@ async def _create_livekit_room(room_name: str, metadata: dict) -> None:
             # Requires the agent worker to be running and connected to the same LiveKit project.
             try:
                 from livekit.api import CreateAgentDispatchRequest  # type: ignore
+                resolved_agent = agent_name or cfg.LIVEKIT_AGENT_NAME
                 await lk.agent_dispatch.create_dispatch(
                     CreateAgentDispatchRequest(
-                        agent_name=cfg.LIVEKIT_AGENT_NAME,
+                        agent_name=resolved_agent,
                         room=room_name,
                         metadata=json.dumps(metadata, ensure_ascii=False),
                     )
                 )
-                logger.info("[livekit] Agent '%s' dispatched to room '%s'.", cfg.LIVEKIT_AGENT_NAME, room_name)
+                logger.info("[livekit] Agent '%s' dispatched to room '%s'.", resolved_agent, room_name)
             except Exception as dispatch_exc:
                 logger.warning("[livekit] Agent dispatch failed (agent may auto-join instead): %s", dispatch_exc)
 
@@ -488,12 +511,27 @@ async def start_interview(
         .first()
     )
 
-    # ── Guard: completed session → 409 ───────────────────────────────────────
-    existing_session: TechnicalInterviewSession = (
-        db.query(TechnicalInterviewSession)
-        .filter(TechnicalInterviewSession.application_id == application.application_id)
-        .first()
+    # ── Mode routing ──────────────────────────────────────────────────────────
+    is_hr = request.mode == "hr"
+    room_name = (
+        f"hr_app_{application.application_id}" if is_hr
+        else f"int_app_{application.application_id}"
     )
+
+    # ── Guard: completed session → 409 ───────────────────────────────────────
+    if is_hr:
+        existing_session = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.application_id == application.application_id)
+            .first()
+        )
+    else:
+        existing_session = (
+            db.query(TechnicalInterviewSession)
+            .filter(TechnicalInterviewSession.application_id == application.application_id)
+            .first()
+        )
+
     if existing_session and existing_session.status == _STATUS_COMPLETED:
         raise HTTPException(
             status_code=409,
@@ -503,12 +541,7 @@ async def start_interview(
             ),
         )
 
-    room_name = f"int_app_{application.application_id}"
-
     # ── Active: interview in progress — block re-entry ────────────────────────
-    # Once the candidate has joined and the agent is conducting the interview,
-    # re-entry is not allowed (same as submitting an assessment twice).
-    # The agent owns the lifecycle; it will close the room when done.
     if existing_session and existing_session.status == _STATUS_ACTIVE:
         raise HTTPException(
             status_code=409,
@@ -522,7 +555,7 @@ async def start_interview(
     if (
         existing_session
         and existing_session.status == _STATUS_SCHEDULED
-        and existing_session.room_name == room_name
+        and getattr(existing_session, "room_name", None) == room_name
     ):
         token, expires_at = _generate_access_token(
             room_name=room_name,
@@ -580,19 +613,77 @@ async def start_interview(
         "application_id": application.application_id,
         "candidate_id": candidate.candidate_id,
         "candidate_name": f"{candidate.first_name} {candidate.last_name}",
+        "job_title": jr.job_title or "",
         "mode": request.mode,
         "language": request.language,
         "persona": request.persona,
         "jd": jd_text,
-        "cvText": cv_text[:6000],        # cap to avoid bloating LiveKit metadata
+        "job_responsibilities": jr.key_responsibilities or "",
+        "cvText": cv_text[:6000],
         "gaps": gaps[:10],
         "strengths": strengths[:10],
         "projects": projects[:8],
         "cv_score": float(sem_report.match_percentage or 0),
     }
 
-    # ── Create LiveKit room with metadata ─────────────────────────────────────
-    await _create_livekit_room(room_name, room_metadata)
+    if is_hr:
+        # Inject tech interview score as context for the HR agent
+        tech_session = (
+            db.query(TechnicalInterviewSession)
+            .filter(TechnicalInterviewSession.application_id == application.application_id)
+            .first()
+        )
+        room_metadata["tech_score"] = float(tech_session.overall_score or 0) if tech_session else 0.0
+        room_metadata["focus_areas"] = [
+            "communication", "teamwork", "leadership", "adaptability", "problem_solving"
+        ]
+
+    # ── Persist / update session BEFORE room creation to get session_id ───────
+    if is_hr:
+        config = _get_or_create_hr_interview_config(request.requisition_id, db)
+        if existing_session:
+            existing_session.room_name = room_name
+            existing_session.language = request.language
+            existing_session.mode = request.mode
+            existing_session.status = _STATUS_SCHEDULED
+            session = existing_session
+        else:
+            session = HRInterviewSession(
+                application_id=application.application_id,
+                config_id=config.config_id,
+                status=_STATUS_SCHEDULED,
+                room_name=room_name,
+                language=request.language,
+                mode="hr",
+                scheduled_at=datetime.utcnow(),
+            )
+            db.add(session)
+    else:
+        config = _get_or_create_interview_config(request.requisition_id, db)
+        if existing_session:
+            existing_session.room_name = room_name
+            existing_session.language = request.language
+            existing_session.mode = request.mode
+            existing_session.status = _STATUS_SCHEDULED
+            session = existing_session
+        else:
+            session = TechnicalInterviewSession(
+                application_id=application.application_id,
+                config_id=config.config_id,
+                status=_STATUS_SCHEDULED,
+                room_name=room_name,
+                language=request.language,
+                mode=request.mode,
+                scheduled_at=datetime.utcnow(),
+            )
+            db.add(session)
+
+    db.flush()  # get session.session_id before room creation
+    room_metadata["session_id"] = session.session_id
+
+    # ── Create LiveKit room with complete metadata ─────────────────────────────
+    agent_name = cfg.LIVEKIT_HR_AGENT_NAME if is_hr else cfg.LIVEKIT_AGENT_NAME
+    await _create_livekit_room(room_name, room_metadata, agent_name=agent_name)
 
     # ── Generate candidate access token ───────────────────────────────────────
     token, expires_at = _generate_access_token(
@@ -600,27 +691,6 @@ async def start_interview(
         identity=f"candidate_{candidate.candidate_id}",
         display_name=f"{candidate.first_name} {candidate.last_name}",
     )
-
-    # ── Persist / update TechnicalInterviewSession ────────────────────────────
-    config = _get_or_create_interview_config(request.requisition_id, db)
-
-    if existing_session:
-        existing_session.room_name = room_name
-        existing_session.language = request.language
-        existing_session.mode = request.mode
-        existing_session.status = _STATUS_SCHEDULED
-        session = existing_session
-    else:
-        session = TechnicalInterviewSession(
-            application_id=application.application_id,
-            config_id=config.config_id,
-            status=_STATUS_SCHEDULED,
-            room_name=room_name,
-            language=request.language,
-            mode=request.mode,
-            scheduled_at=datetime.utcnow(),
-        )
-        db.add(session)
 
     db.commit()
     db.refresh(session)
@@ -660,11 +730,18 @@ async def get_interview_status(
 
     Used by the Frontend for polling and by HR dashboards for real-time monitoring.
     """
-    session: TechnicalInterviewSession = (
-        db.query(TechnicalInterviewSession)
-        .filter(TechnicalInterviewSession.room_name == room_name)
-        .first()
-    )
+    if room_name.startswith("hr_app_"):
+        session = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.room_name == room_name)
+            .first()
+        )
+    else:
+        session = (
+            db.query(TechnicalInterviewSession)
+            .filter(TechnicalInterviewSession.room_name == room_name)
+            .first()
+        )
 
     lk_info = await _get_livekit_room_info(room_name)
 
@@ -876,11 +953,19 @@ async def livekit_webhook(
     db_gen = get_db()
     db: Session = next(db_gen)
     try:
-        session: TechnicalInterviewSession = (
-            db.query(TechnicalInterviewSession)
-            .filter(TechnicalInterviewSession.room_name == room_name)
-            .first()
-        )
+        is_hr_room = room_name.startswith("hr_app_")
+        if is_hr_room:
+            session = (
+                db.query(HRInterviewSession)
+                .filter(HRInterviewSession.room_name == room_name)
+                .first()
+            )
+        else:
+            session = (
+                db.query(TechnicalInterviewSession)
+                .filter(TechnicalInterviewSession.room_name == room_name)
+                .first()
+            )
 
         if event_type == "room_finished":
             if session and session.status != _STATUS_COMPLETED:
@@ -889,8 +974,10 @@ async def livekit_webhook(
                 db.commit()
                 logger.info("[webhook] Session %d marked Completed.", session.session_id)
 
-                # Trigger final ranking check
-                _trigger_final_ranking(session, db)
+                if is_hr_room:
+                    _trigger_hr_final_ranking(session, db)
+                else:
+                    _trigger_final_ranking(session, db)
 
         elif event_type == "participant_left":
             participant = payload.get("participant", {})
@@ -910,7 +997,7 @@ async def livekit_webhook(
 
 
 def _trigger_final_ranking(session: TechnicalInterviewSession, db: Session) -> None:
-    """Fire the Celery task that checks if all interviews are done and computes final ranking."""
+    """Fire the Celery task that checks if all tech interviews are done → dispatch HR invitations."""
     try:
         application = (
             db.query(Application)
@@ -919,13 +1006,28 @@ def _trigger_final_ranking(session: TechnicalInterviewSession, db: Session) -> N
         )
         if application and application.posting:
             requisition_id = application.posting.requisition_id
-            from tasks.interview_tasks import maybe_dispatch_final_ranking  # local import avoids circular
+            from tasks.interview_tasks import maybe_dispatch_final_ranking
             maybe_dispatch_final_ranking.delay(requisition_id)
-            logger.info(
-                "[webhook] Dispatched maybe_dispatch_final_ranking for JR %d.", requisition_id
-            )
+            logger.info("[webhook] Dispatched maybe_dispatch_final_ranking for JR %d.", requisition_id)
     except Exception as exc:
         logger.warning("[webhook] Could not dispatch final ranking: %s", exc)
+
+
+def _trigger_hr_final_ranking(session: HRInterviewSession, db: Session) -> None:
+    """Fire the Celery task that checks if all HR interviews are done → dispatch final ranking."""
+    try:
+        application = (
+            db.query(Application)
+            .filter(Application.application_id == session.application_id)
+            .first()
+        )
+        if application and application.posting:
+            requisition_id = application.posting.requisition_id
+            from tasks.interview_tasks import maybe_dispatch_final_ranking_after_hr
+            maybe_dispatch_final_ranking_after_hr.delay(requisition_id)
+            logger.info("[webhook] Dispatched maybe_dispatch_final_ranking_after_hr for JR %d.", requisition_id)
+    except Exception as exc:
+        logger.warning("[webhook] Could not dispatch HR final ranking: %s", exc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1039,11 +1141,17 @@ async def reset_interview(
 
     **Cannot be used to reset a `Completed` session.** Results are permanent.
     """
-    session: TechnicalInterviewSession = (
+    session = (
         db.query(TechnicalInterviewSession)
         .filter(TechnicalInterviewSession.session_id == session_id)
         .first()
     )
+    if not session:
+        session = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.session_id == session_id)
+            .first()
+        )
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
 

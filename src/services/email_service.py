@@ -477,6 +477,7 @@ def _build_hr_interview_invitation_message(
     first_name: str,
     job_title: str,
     interview_deadline: str,
+    interview_url: str = "",
 ) -> MIMEMultipart:
     cfg = get_settings()
     sender = f"{cfg.SMTP_FROM_NAME} <{cfg.SMTP_USER}>"
@@ -486,17 +487,25 @@ def _build_hr_interview_invitation_message(
     msg["From"] = sender
     msg["To"] = recipient_email
 
+    url_line = f"\nJoin your HR interview here:\n{interview_url}\n" if interview_url else ""
+    url_html = (
+        f'<p style="margin:20px 0;">'
+        f'<a href="{interview_url}" style="background:#0f172a;color:#fff;padding:12px 24px;'
+        f'border-radius:6px;text-decoration:none;font-weight:bold;">Start HR Interview</a></p>'
+        if interview_url else ""
+    )
+
     plain = (
         f"Dear {first_name},\n\n"
         f"Congratulations! You have successfully completed the technical interview stage "
         f"and have been selected to move forward to the HR Interview for the "
         f"{job_title} position.\n\n"
-        f"Our HR team will be in touch shortly to schedule your interview session.\n"
-        f"Please ensure you are available before: {interview_deadline}\n\n"
+        f"Please complete your AI-conducted HR interview before: {interview_deadline}\n"
+        f"{url_line}\n"
         f"What to expect:\n"
-        f"  • The HR interview typically takes 30–45 minutes.\n"
-        f"  • Topics include your background, motivation, culture fit, and leadership style.\n"
-        f"  • Be prepared to discuss your previous experiences and career goals.\n\n"
+        f"  • The HR interview takes 30–45 minutes via voice.\n"
+        f"  • You will be asked behavioral and situational questions.\n"
+        f"  • Be prepared to share specific examples from your past experiences.\n\n"
         f"We look forward to speaking with you!\n\n"
         f"Best regards,\n"
         f"TalentPilot AI Recruitment Team"
@@ -512,11 +521,12 @@ def _build_hr_interview_invitation_message(
           and have been selected to advance to the <strong>HR Interview</strong> for the
           <strong>{job_title}</strong> position.
         </p>
-        <p>Our HR team will contact you to schedule your session before: <strong>{interview_deadline}</strong></p>
+        <p>Please complete your AI-conducted HR interview before: <strong>{interview_deadline}</strong></p>
+        {url_html}
         <ul style="color:#555;font-size:14px;">
-          <li>The HR interview typically takes 30–45 minutes.</li>
-          <li>Topics include your background, motivation, culture fit, and leadership style.</li>
-          <li>Be prepared to discuss your previous experiences and career goals.</li>
+          <li>The HR interview takes 30–45 minutes via voice.</li>
+          <li>You will be asked behavioral and situational questions.</li>
+          <li>Be prepared to share specific examples from your past experiences.</li>
         </ul>
         <p>We look forward to speaking with you!</p>
         <p style="color:#666;font-size:13px;">
@@ -536,6 +546,7 @@ def send_hr_interview_invitation_sync(
     first_name: str,
     job_title: str,
     interview_deadline: str,
+    interview_url: str = "",
 ) -> bool:
     """
     Send an HR interview invitation email synchronously (blocking).
@@ -556,6 +567,7 @@ def send_hr_interview_invitation_sync(
             first_name=first_name,
             job_title=job_title,
             interview_deadline=interview_deadline,
+            interview_url=interview_url,
         )
         with smtplib.SMTP(cfg.SMTP_HOST, cfg.SMTP_PORT) as server:
             server.ehlo()
