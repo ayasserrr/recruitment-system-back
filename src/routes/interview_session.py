@@ -798,7 +798,8 @@ async def get_interview_results(
 
     Use this endpoint after `GET /api/interview/status` returns `"Completed"`.
     """
-    session: TechnicalInterviewSession = (
+    # Try technical session first, fall back to HR session
+    session = (
         db.query(TechnicalInterviewSession)
         .options(
             joinedload(TechnicalInterviewSession.report),
@@ -813,6 +814,24 @@ async def get_interview_results(
         .filter(TechnicalInterviewSession.session_id == session_id)
         .first()
     )
+    _is_hr_session = False
+    if not session:
+        session = (
+            db.query(HRInterviewSession)
+            .options(
+                joinedload(HRInterviewSession.report),
+                joinedload(HRInterviewSession.application)
+                .joinedload(Application.candidate),
+                joinedload(HRInterviewSession.application)
+                .joinedload(Application.posting)
+                .joinedload(JobPosting.requisition),
+                joinedload(HRInterviewSession.application)
+                .joinedload(Application.semantic_report),
+            )
+            .filter(HRInterviewSession.session_id == session_id)
+            .first()
+        )
+        _is_hr_session = True
 
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
@@ -1058,11 +1077,21 @@ async def complete_interview(
     The Agent should call this endpoint with its computed score payload after
     finalising the candidate evaluation.
     """
-    session: TechnicalInterviewSession = (
+    # Try technical session first, fall back to HR session
+    session = (
         db.query(TechnicalInterviewSession)
         .filter(TechnicalInterviewSession.session_id == session_id)
         .first()
     )
+    _complete_is_hr = False
+    if not session:
+        session = (
+            db.query(HRInterviewSession)
+            .filter(HRInterviewSession.session_id == session_id)
+            .first()
+        )
+        _complete_is_hr = True
+
     if not session:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
 
@@ -1081,8 +1110,8 @@ async def complete_interview(
     if body.recommendation:
         session.recommendation = body.recommendation
 
-    # Persist transcript to SemanticAnalysisReport.ai_insights
-    if body.transcript:
+    # Persist transcript to SemanticAnalysisReport.ai_insights (tech sessions only)
+    if body.transcript and not _complete_is_hr:
         sem = (
             db.query(SemanticAnalysisReport)
             .filter(SemanticAnalysisReport.application_id == session.application_id)
@@ -1103,10 +1132,13 @@ async def complete_interview(
             sem.ai_insights = json.dumps(insights, ensure_ascii=False)
 
     db.commit()
-    logger.info("[complete] Session %d marked Completed. score=%.1f",
-                session_id, body.overall_score or 0)
+    logger.info("[complete] Session %d (%s) marked Completed. score=%.1f",
+                session_id, "hr" if _complete_is_hr else "tech", body.overall_score or 0)
 
-    _trigger_final_ranking(session, db)
+    if _complete_is_hr:
+        _trigger_hr_final_ranking(session, db)
+    else:
+        _trigger_final_ranking(session, db)
 
     return {
         "status": "completed",

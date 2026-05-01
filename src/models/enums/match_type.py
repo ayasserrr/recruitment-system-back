@@ -1,6 +1,1 @@
-import enum
-
-class MatchType(str, enum.Enum):
-    EXACT = "Exact"
-    SEMANTIC = "Semantic"
-    MISSING = "Missing"
+from enums.match_type import MatchType  # noqa: F401

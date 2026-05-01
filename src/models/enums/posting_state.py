@@ -1,6 +1,1 @@
-import enum
-
-class PostingState(str, enum.Enum):
-    OPEN = "Open"
-    PAUSED = "Paused"
-    CLOSED = "Closed"
+from enums.posting_state import PostingState  # noqa: F401

@@ -45,6 +45,7 @@ def persist_rankings_node(state: FinalRankingState) -> FinalRankingState:
                 existing.final_status              = row["final_status"]
                 existing.red_flag                  = row["red_flag"]
                 existing.red_flag_reason           = row["red_flag_reason"]
+                existing.risk_score                = row.get("risk_score")
                 existing.shap_json                 = row.get("shap_json")
                 existing.shap_summary              = row.get("shap_summary")
             else:
@@ -61,6 +62,7 @@ def persist_rankings_node(state: FinalRankingState) -> FinalRankingState:
                     final_status=row["final_status"],
                     red_flag=row["red_flag"],
                     red_flag_reason=row["red_flag_reason"],
+                    risk_score=row.get("risk_score"),
                     shap_json=row.get("shap_json"),
                     shap_summary=row.get("shap_summary"),
                 ))

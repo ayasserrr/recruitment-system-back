@@ -17,7 +17,7 @@ class AnswerResult(BaseModel):
     question_text: str
     question_type: str
     candidate_answer: str
-    score_awarded: float
+    score_awarded: Optional[float]   # None for open-ended (graded post-deadline)
     max_points: int
     ai_feedback: str
 
@@ -25,11 +25,12 @@ class AnswerResult(BaseModel):
 class AssessmentSubmitResponse(BaseModel):
     assessment_id: int
     status: str
-    total_score: float
+    total_score: float               # MCQ-only until post-deadline grading runs
     passing_score: Optional[float]
-    passed: Optional[bool]
+    passed: Optional[bool]           # None until open-ended scores are available
     answers: list[AnswerResult]
     report: Optional["AssessmentReportResponse"]
+    grading_note: Optional[str] = None  # explains deferred open-ended grading
 
 
 class AssessmentReportResponse(BaseModel):

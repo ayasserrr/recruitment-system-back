@@ -4,19 +4,19 @@ HR Analysis Service — Phase 8 Soft-Skills Scoring Engine
 
 Analyzes candidate responses during HR interviews using 4 models:
 
-  1. Go-Emotions   (SamLowe/roberta-base-go_emotions)                — emotion classification
+  1. Go-Emotions   (SamLowe/roberta-base-go_emotions)                — emotion classification (diagnostic)
   2. RoBERTa Sent. (cardiffnlp/twitter-roberta-base-sentiment-latest) — tone / professionalism
   3. DeBERTa NLI   (cross-encoder/nli-deberta-v3-small)              — alignment with job context
   4. BGE bi-encoder (reused from embedding_service)                   — semantic depth vs JD
 
-Feature vector (used for SHAP):
-    [emotion_score, sentiment_score, nli_align_score, semantic_depth_score]
+Composite score weights (Go-Emotions excluded from composite — stored as diagnostic signal only):
+    nli_align_score:      0.55
+    semantic_depth_score: 0.35
+    sentiment_score:      0.10
 
-Weights:
-    nli_align_score:      0.35
-    emotion_score:        0.25
-    semantic_depth_score: 0.20
-    sentiment_score:      0.20
+Go-Emotions is excluded from the composite because it was trained on Reddit data and
+introduces systematic bias against non-native speakers and culturally different expression styles.
+It is still computed and stored on the session row for human review / audit.
 
 SHAP is computed analytically (exact for linear models).
 
@@ -28,7 +28,7 @@ Usage (called from HR scoring pipeline after interview transcript is available):
         job_title="Senior ML Engineer",
         job_responsibilities="Design and deploy ML pipelines...",
     )
-    # result keys: emotion_score, sentiment_score, nli_align_score,
+    # result keys: emotion_score (diagnostic), sentiment_score, nli_align_score,
     #              semantic_depth_score, composite_score, shap_json, shap_summary
 """
 from __future__ import annotations
@@ -60,22 +60,22 @@ _POSITIVE_EMOTIONS = frozenset({
     "pride", "relief", "realization",
 })
 
-# ── HR scoring weights ────────────────────────────────────────────────────────
+# ── HR scoring weights (emotion_score excluded — diagnostic only) ─────────────
 HR_WEIGHTS: dict[str, float] = {
-    "nli_align_score":      0.35,
-    "emotion_score":        0.25,
-    "semantic_depth_score": 0.20,
-    "sentiment_score":      0.20,
+    "nli_align_score":      0.55,
+    "semantic_depth_score": 0.35,
+    "sentiment_score":      0.10,
 }
 
 _HR_BASELINES: dict[str, float] = {
     "nli_align_score":      0.40,
-    "emotion_score":        0.40,
     "semantic_depth_score": 0.30,
     "sentiment_score":      0.50,
+    # emotion_score baseline kept for diagnostic fallback only (not in composite)
+    "emotion_score":        0.40,
 }
 
-HR_FEATURE_ORDER: list[str] = list(HR_WEIGHTS.keys())
+HR_FEATURE_ORDER: list[str] = list(HR_WEIGHTS.keys())  # excludes emotion_score
 
 
 # ── Lazy loaders ──────────────────────────────────────────────────────────────
@@ -247,6 +247,7 @@ def compute_hr_shap(feature_scores: dict[str, float]) -> dict[str, float]:
     """
     Exact SHAP values for the linear HR scoring function.
     phi_i = w_i * (x_i - baseline_i)
+    Only covers the three composite features (emotion excluded).
     """
     return {
         feat: round(HR_WEIGHTS[feat] * (feature_scores.get(feat, _HR_BASELINES[feat]) - _HR_BASELINES[feat]), 4)
@@ -324,6 +325,7 @@ def score_transcript(
         shap_vals  = compute_hr_shap(zero_feats)
         return {
             **zero_feats,
+            "emotion_score":   0.0,   # diagnostic only — not in composite
             "composite_score": 0.0,
             "shap_json":       json.dumps(shap_vals),
             "shap_summary":    "No transcript available.",
@@ -339,7 +341,7 @@ def score_transcript(
         # Fallback: treat entire transcript as one candidate turn
         turns = [transcript[:2000]]
 
-    emotion_scores:  list[float] = []
+    emotion_scores:   list[float] = []
     sentiment_scores: list[float] = []
     nli_scores:       list[float] = []
     all_top_emotions: list[dict]  = []
@@ -348,7 +350,7 @@ def score_transcript(
         if not turn_text.strip():
             continue
 
-        # Emotion
+        # Emotion — diagnostic only; stored but not included in composite
         emotion_result = _score_emotions(turn_text)
         emotion_scores.append(emotion_result["emotion_score"])
         all_top_emotions.extend(emotion_result.get("top_emotions", []))
@@ -366,12 +368,14 @@ def score_transcript(
     combined_candidate_text = " ".join(turns[:10])  # cap at ~10 turns
     semantic_depth = _score_semantic_depth(combined_candidate_text, job_context)
 
+    # Composite feature scores — emotion excluded to avoid demographic bias
     feature_scores: dict[str, float] = {
         "nli_align_score":      _safe_mean(nli_scores),
-        "emotion_score":        _safe_mean(emotion_scores),
         "semantic_depth_score": semantic_depth,
         "sentiment_score":      _safe_mean(sentiment_scores),
     }
+    # Emotion stored separately for human review (not in HR_FEATURE_ORDER)
+    emotion_score_diagnostic = _safe_mean(emotion_scores)
 
     composite = round(
         sum(HR_WEIGHTS[f] * feature_scores[f] for f in HR_FEATURE_ORDER), 4
@@ -381,7 +385,7 @@ def score_transcript(
     summary   = hr_shap_summary(shap_vals, candidate_name)
 
     # Deduplicate top emotions by label, keep highest score
-    seen_labels:   set[str]   = set()
+    seen_labels:      set[str]   = set()
     deduped_emotions: list[dict] = []
     for e in sorted(all_top_emotions, key=lambda x: x["score"], reverse=True):
         if e["label"] not in seen_labels:
@@ -391,14 +395,16 @@ def score_transcript(
             break
 
     logger.info(
-        "[hr_analysis] Transcript scored — turns=%d, emotion=%.3f, sentiment=%.3f, "
-        "nli=%.3f, depth=%.3f → composite=%.3f",
-        len(turns), feature_scores["emotion_score"], feature_scores["sentiment_score"],
-        feature_scores["nli_align_score"], feature_scores["semantic_depth_score"], composite,
+        "[hr_analysis] Transcript scored — turns=%d, nli=%.3f, depth=%.3f, "
+        "sentiment=%.3f → composite=%.3f (emotion=%.3f diagnostic)",
+        len(turns), feature_scores["nli_align_score"],
+        feature_scores["semantic_depth_score"], feature_scores["sentiment_score"],
+        composite, emotion_score_diagnostic,
     )
 
     return {
         **feature_scores,
+        "emotion_score":   emotion_score_diagnostic,   # diagnostic — not in composite
         "composite_score": composite,
         "shap_json":       json.dumps(shap_vals),
         "shap_summary":    summary,

@@ -85,7 +85,8 @@ _INTERVIEW_DEADLINE_DAYS = 7
 _HR_INTERVIEW_DEADLINE_DAYS = 5
 _BATCH_SIZE = 10
 _BATCH_DELAY_SECONDS = 2
-_TERMINAL = {"Completed", "No-show", "Cancelled"}
+from enums.interview_status import InterviewStatus as _IS
+_TERMINAL = _IS.terminal_set()
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -294,6 +295,14 @@ def maybe_dispatch_final_ranking(requisition_id: int) -> dict:
 
     finally:
         db.close()
+
+    # Update rank_in_pool for all completed technical reports before sending HR invites
+    try:
+        from services.report_generation_service import update_technical_pool_ranks
+        updated = update_technical_pool_ranks(requisition_id)
+        logger.info("[tech_done] Updated tech pool ranks for JR %d — %d reports.", requisition_id, updated)
+    except Exception as exc:
+        logger.warning("[tech_done] Could not update tech pool ranks for JR %d: %s", requisition_id, exc)
 
     send_hr_interview_invitations.delay(requisition_id)
     logger.info("[tech_done] All tech sessions terminal for JR %d — dispatched HR invitations.", requisition_id)
@@ -676,6 +685,20 @@ def compute_final_ranking(self, requisition_id: int) -> dict:
         requisition_id, len(scored), len(red_flags), result.get("emails_sent", 0),
     )
 
+    # ── Update HR pool ranks + generate per-candidate final reports ───────────
+    try:
+        from services.report_generation_service import (
+            update_hr_pool_ranks,
+            generate_final_candidate_summary,
+        )
+        update_hr_pool_ranks(requisition_id)
+        logger.info("[final_ranker] HR pool ranks updated for JR %d.", requisition_id)
+    except Exception as exc:
+        logger.warning("[final_ranker] Could not update HR pool ranks for JR %d: %s", requisition_id, exc)
+
+    # Generate per-candidate final summary reports and store on FinalRanking rows
+    _generate_final_reports(requisition_id, scored)
+
     top_candidate_name = None
     if scored:
         c = scored[0].get("candidate")
@@ -692,3 +715,184 @@ def compute_final_ranking(self, requisition_id: int) -> dict:
         "top_candidate": top_candidate_name,
         "top_score": scored[0]["weighted_total_score"] if scored else None,
     }
+
+
+# ── Final per-candidate report generation ────────────────────────────────────
+
+def _generate_final_reports(requisition_id: int, scored: list) -> None:
+    """
+    For every entry in the scored list (from FinalRankingGraph), build a
+    plain-text final summary report and store it on the FinalRanking row.
+
+    Uses generate_final_candidate_summary() — zero LLM calls.
+    Pulls per-candidate tech/HR reports for strengths/weaknesses narrative.
+    """
+    if not scored:
+        return
+
+    db = SessionLocal()
+    try:
+        from services.report_generation_service import generate_final_candidate_summary
+        from models.db.final_ranking import FinalRanking
+        from models.db.technical_interview_session import TechnicalInterviewSession
+        from models.db.technical_interview_report import TechnicalInterviewReport
+        from models.db.hr_interview_session import HRInterviewSession
+        from models.db.hr_interview_report import HRInterviewReport
+        from models.db.semantic_analysis_report import SemanticAnalysisReport
+        from sqlalchemy.orm import joinedload
+
+        total = len(scored)
+        job_title = ""
+
+        for rank, entry in enumerate(scored, start=1):
+            try:
+                candidate = entry.get("candidate")
+                if not candidate:
+                    continue
+
+                candidate_name = (
+                    f"{getattr(candidate, 'first_name', '')} "
+                    f"{getattr(candidate, 'last_name', '')}".strip()
+                ) or "Candidate"
+
+                # Get application_id from any session of this candidate
+                app_id = entry.get("application_id") or (
+                    getattr(entry.get("ranking"), "application_id", None)
+                    if entry.get("ranking") else None
+                )
+                if not app_id:
+                    continue
+
+                # ── Scores ────────────────────────────────────────────────────
+                weighted_total = float(entry.get("weighted_total_score") or 0)
+                cv_score       = float(entry.get("semantic_score") or 0)  # field is semantic_score, not cv_score
+
+                tech_sess = (
+                    db.query(TechnicalInterviewSession)
+                    .filter(TechnicalInterviewSession.application_id == app_id)
+                    .first()
+                )
+                hr_sess = (
+                    db.query(HRInterviewSession)
+                    .filter(HRInterviewSession.application_id == app_id)
+                    .first()
+                )
+
+                tech_score = float(tech_sess.overall_score or 0) if tech_sess else 0.0
+                hr_score   = float(hr_sess.overall_score   or 0) if hr_sess else 0.0
+                tech_tier  = _tier_label(tech_score)
+                hr_tier    = _tier_label(hr_score)
+
+                # ── Strengths / weaknesses from sub-reports ───────────────────
+                import json as _json
+
+                tech_strengths: list[str] = []
+                tech_weaknesses: list[str] = []
+                if tech_sess:
+                    tech_report = (
+                        db.query(TechnicalInterviewReport)
+                        .filter(TechnicalInterviewReport.session_id == tech_sess.session_id)
+                        .first()
+                    )
+                    if tech_report:
+                        try:
+                            tech_strengths  = _json.loads(tech_report.strengths  or "[]")
+                            tech_weaknesses = _json.loads(tech_report.weaknesses or "[]")
+                        except Exception:
+                            pass
+
+                hr_strengths: list[str] = []
+                hr_weaknesses: list[str] = []
+                if hr_sess:
+                    hr_report = (
+                        db.query(HRInterviewReport)
+                        .filter(HRInterviewReport.session_id == hr_sess.session_id)
+                        .first()
+                    )
+                    if hr_report:
+                        try:
+                            hr_strengths  = _json.loads(hr_report.strengths  or "[]")
+                            hr_weaknesses = _json.loads(hr_report.weaknesses or "[]")
+                            if not job_title and hr_report.interview_summary:
+                                pass  # job title comes from JR below
+                        except Exception:
+                            pass
+
+                # ── Job title ─────────────────────────────────────────────────
+                if not job_title:
+                    try:
+                        from models.db.application import Application
+                        from models.db.job_posting import JobPosting
+                        from models.db.job_requisition import JobRequisition
+                        app_row = db.query(Application).filter(
+                            Application.application_id == app_id
+                        ).first()
+                        if app_row and app_row.posting:
+                            jr = db.query(JobRequisition).filter(
+                                JobRequisition.requisition_id == app_row.posting.requisition_id
+                            ).first()
+                            job_title = (jr.job_title or "") if jr else ""
+                    except Exception:
+                        pass
+
+                # ── Red flag ──────────────────────────────────────────────────
+                red_flag = bool(entry.get("red_flag", False))
+                red_flag_reason = entry.get("red_flag_reason", "") or ""
+
+                # ── Build narrative ───────────────────────────────────────────
+                narrative = generate_final_candidate_summary(
+                    candidate_name=candidate_name,
+                    job_title=job_title or "the position",
+                    cv_score=cv_score,
+                    tech_score=tech_score,
+                    hr_score=hr_score,
+                    final_score=weighted_total,
+                    final_rank=rank,
+                    total_candidates=total,
+                    tech_tier=tech_tier,
+                    hr_tier=hr_tier,
+                    tech_strengths=tech_strengths,
+                    hr_strengths=hr_strengths,
+                    tech_weaknesses=tech_weaknesses,
+                    hr_weaknesses=hr_weaknesses,
+                    red_flag=red_flag,
+                    red_flag_reason=red_flag_reason,
+                )
+
+                # ── Store on FinalRanking row ─────────────────────────────────
+                ranking_row = entry.get("ranking")
+                if ranking_row is None:
+                    # Try to look it up
+                    posting = _get_posting(db, requisition_id)
+                    if posting:
+                        ranking_row = (
+                            db.query(FinalRanking)
+                            .filter(
+                                FinalRanking.posting_id == posting.posting_id,
+                                FinalRanking.application_id == app_id,
+                            )
+                            .first()
+                        )
+
+                if ranking_row and hasattr(ranking_row, "summary"):
+                    ranking_row.summary     = narrative
+                    ranking_row.final_rank  = rank   # column is final_rank, not rank
+                    ranking_row.risk_score  = entry.get("risk_score")
+
+                logger.debug(
+                    "[final_reports] Report generated for %s (rank #%d).",
+                    candidate_name, rank,
+                )
+
+            except Exception as exc:
+                logger.warning("[final_reports] Failed for entry %d: %s", rank, exc)
+                continue
+
+        db.commit()
+        logger.info("[final_reports] Final reports committed for JR %d.", requisition_id)
+
+    except Exception:
+        db.rollback()
+        logger.exception("[final_reports] Unexpected error for JR %d.", requisition_id)
+    finally:
+        db.close()

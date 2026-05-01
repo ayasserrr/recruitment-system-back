@@ -10,34 +10,35 @@ For each application:
                           (prefers codebert/roberta/nli/tfidf columns if populated
                            by tech_interview_node, else falls back to overall_score)
   4. HR Interview       — ensemble composite from HRInterviewSession
-                          (prefers emotion/sentiment/nli/depth columns if populated
+                          (prefers nli/depth/sentiment columns if populated
                            by hr_analysis_node, else falls back to overall_score)
 
-Weighted total (default 20 / 25 / 30 / 25, proportionally redistributed
-when any stage is absent):
+Weighted total (default 20 / 25 / 30 / 25, role-adjusted by compute_weights_node,
+proportionally redistributed when any stage is absent):
     weighted_total = w_cv × screening
                    + w_a  × assessment
                    + w_ti × tech_interview
                    + w_hr × hr_interview
 
-Cross-phase SHAP (analytical):
-    φ_i = w_i × (score_i / 100 − 0.50)   for each stage i
-    Positive φ → stage score above the average-candidate baseline.
-    Negative φ → stage score below baseline.
+Cross-phase SHAP (pool-median baseline, analytical):
+    φ_i = w_i × (score_i / 100 − median_i / 100)
+    Positive φ → stage score above the pool median for that stage.
+    Negative φ → stage score below the pool median.
 
-Red-flag rules:
-  RF-1 (Interview collapse):
-      screening ≥ 80  AND  tech_interview < 40
-      → strong CV but collapsed in live technical depth check.
-
-  RF-2 (Cheating suspicion):
-      assessment − tech_interview > RED_FLAG_CHEAT_GAP (default 30 pts)
-      → aced the online test but couldn't demonstrate equivalent depth in the
-         live interview; warrants manual review for assisted assessment.
+Probabilistic risk score (replaces hard red-flag thresholds):
+    RF-1 (Interview collapse):
+        risk contribution when cv ≥ 80 AND tech < 40, using product of two sigmoids.
+    RF-2 (Cheating suspicion):
+        risk contribution when (assessment − tech) > 30, using a single sigmoid.
+    risk_score = min(1.0, rf1 + rf2)   ∈ [0, 1]
+    red_flag = risk_score ≥ 0.65
+    Soft penalty applied to all candidates: score *= (1 − 0.15 × risk_score)
 """
 
 import json
 import logging
+import math
+import statistics
 
 from database.connection import SessionLocal
 from graphs.states.final_ranking_state import FinalRankingState
@@ -48,31 +49,27 @@ from models.db.technical_interview_session import TechnicalInterviewSession
 
 logger = logging.getLogger(__name__)
 
-# ── Red-flag thresholds ───────────────────────────────────────────────────────
-_RED_FLAG_CV_MIN         = 80.0   # RF-1: screening score that triggers a "strong CV"
-_RED_FLAG_TECH_MIN       = 40.0   # RF-1: tech interview below this → collapse
-_RED_FLAG_CHEAT_GAP      = 30.0   # RF-2: assessment − tech_interview gap → cheating suspicion
+# ── Red-flag thresholds (used in sigmoid midpoints) ───────────────────────────
+_RF1_CV_MIDPOINT   = 80.0   # sigmoid midpoint for "strong CV" axis
+_RF1_TECH_MIDPOINT = 40.0   # sigmoid midpoint for "collapsed tech" axis (score below)
+_RF2_GAP_MIDPOINT  = 30.0   # sigmoid midpoint for assessment-tech gap
+_RISK_FLAG_THRESH  = 0.65   # risk_score ≥ this → red_flag = True
+_RISK_SOFT_PENALTY = 0.15   # score *= (1 - _RISK_SOFT_PENALTY * risk_score)
 
-# ── SHAP baseline: average candidate (0–1 normalized) ────────────────────────
-_SHAP_BASELINES = {
-    "cv":             0.50,
-    "assessment":     0.50,
-    "tech_interview": 0.50,
-    "hr_interview":   0.50,
-}
-
-# ── Ensemble weights per phase (must match the respective service files) ──────
+# ── Ensemble weights per phase — MUST match services/tech_analysis_service.py
+#    and services/hr_analysis_service.py exactly so the recomputed composite
+#    here equals the overall_score stored on the session row.
 _TECH_ENSEMBLE_WEIGHTS = {
-    "codebert_score":        0.40,
-    "roberta_depth_score":   0.30,
-    "nli_technical_score":   0.20,
-    "tfidf_technical_score": 0.10,
+    "nli_technical_score":   0.35,
+    "codebert_score":        0.30,
+    "tfidf_technical_score": 0.20,
+    "roberta_depth_score":   0.15,
 }
+# emotion_score excluded from HR composite (diagnostic only — see hr_analysis_service.py)
 _HR_ENSEMBLE_WEIGHTS = {
-    "nli_align_score":      0.35,
-    "emotion_score":        0.25,
-    "semantic_depth_score": 0.20,
-    "sentiment_score":      0.20,
+    "nli_align_score":      0.55,
+    "semantic_depth_score": 0.35,
+    "sentiment_score":      0.10,
 }
 
 
@@ -81,24 +78,87 @@ def _to_100(score: float) -> float:
     return score * 10.0 if score <= 10.0 else min(score, 100.0)
 
 
+def _sigmoid(x: float, midpoint: float = 0.0, steepness: float = 0.20) -> float:
+    """Logistic sigmoid; returns values in (0, 1)."""
+    return 1.0 / (1.0 + math.exp(-steepness * (x - midpoint)))
+
+
+def _compute_risk_score(
+    cv_score: float,
+    assessment_score: float | None,
+    tech_score: float | None,
+) -> float:
+    """
+    Continuous risk score in [0, 1].
+    RF-1: strong CV but weak live technical (product of two sigmoids).
+    RF-2: large assessment-tech gap suggesting assisted assessment (single sigmoid).
+    """
+    rf1 = 0.0
+    if tech_score is not None:
+        # Both conditions must be true: cv is high AND tech is low
+        rf1 = _sigmoid(cv_score, _RF1_CV_MIDPOINT) * _sigmoid(_RF1_TECH_MIDPOINT - tech_score, 0.0)
+
+    rf2 = 0.0
+    if assessment_score is not None and tech_score is not None:
+        rf2 = _sigmoid(assessment_score - tech_score, _RF2_GAP_MIDPOINT)
+
+    return min(1.0, rf1 + rf2)
+
+
+def _risk_reason(
+    risk_score: float,
+    cv_score: float,
+    assessment_score: float | None,
+    tech_score: float | None,
+) -> str | None:
+    if risk_score < 0.30:
+        return None
+    parts = []
+    if tech_score is not None and cv_score >= 75 and tech_score < 45:
+        parts.append(
+            f"RF-1 Interview Collapse risk: CV {cv_score:.1f}% vs "
+            f"Technical Interview {tech_score:.1f}% (risk={risk_score:.2f})"
+        )
+    if assessment_score is not None and tech_score is not None and assessment_score - tech_score > 20:
+        parts.append(
+            f"RF-2 Cheating Suspicion risk: Assessment {assessment_score:.1f}% vs "
+            f"Technical Interview {tech_score:.1f}% gap={assessment_score - tech_score:.1f}pts "
+            f"(risk={risk_score:.2f})"
+        )
+    return " | ".join(parts) if parts else f"Elevated risk score {risk_score:.2f} — manual review recommended."
+
+
+def _pool_medians(raw_list: list[dict]) -> dict[str, float]:
+    """
+    Compute pool medians for each scoring stage.
+    Uses 50% fallback when fewer than 2 non-null values exist for a stage.
+    """
+    def _median_or_half(vals: list[float]) -> float:
+        valid = [v for v in vals if v is not None]
+        return statistics.median(valid) if len(valid) >= 2 else 50.0
+
+    return {
+        "cv":             _median_or_half([r["cv_score"]           for r in raw_list]),
+        "assessment":     _median_or_half([r["assessment_score"]   for r in raw_list if r["assessment_score"] is not None]),
+        "tech_interview": _median_or_half([r["tech_score"]         for r in raw_list if r["tech_score"] is not None]),
+        "hr_interview":   _median_or_half([r["hr_score"]           for r in raw_list if r["hr_score"] is not None]),
+    }
+
+
 def _cross_phase_summary(
     shap_vals: dict,
     candidate_name: str,
+    risk_score: float,
     assessment_score: float | None,
     tech_score: float | None,
 ) -> str:
-    """
-    Human-readable SHAP narrative for the decision-maker report.
-    Includes a cheating-suspicion flag when the assessment-tech gap is large.
-    """
     sorted_contribs = sorted(shap_vals.items(), key=lambda x: abs(x[1]), reverse=True)
     lines = [f"Cross-Phase SHAP — {candidate_name}:"]
     for phase, phi in sorted_contribs:
         sign      = f"+{phi:.3f}" if phi >= 0 else f"{phi:.3f}"
         direction = "above" if phi >= 0 else "below"
-        lines.append(f"  {phase}: {sign} vs average candidate ({direction} baseline)")
+        lines.append(f"  {phase}: {sign} vs pool median ({direction} median)")
 
-    # Identify the most and least influential stages
     if len(sorted_contribs) >= 2:
         top = sorted_contribs[0]
         lines.append(
@@ -106,49 +166,46 @@ def _cross_phase_summary(
             f"({'strength' if top[1] >= 0 else 'weakness'})."
         )
 
-    # Cheating-suspicion callout in the narrative
-    if (
-        assessment_score is not None
-        and tech_score is not None
-        and assessment_score - tech_score > _RED_FLAG_CHEAT_GAP
-    ):
-        lines.append(
-            f"  ⚠ Large gap: Assessment {assessment_score:.1f}% vs "
-            f"Technical Interview {tech_score:.1f}% — manual review recommended."
-        )
+    if risk_score >= 0.30:
+        if (
+            assessment_score is not None
+            and tech_score is not None
+            and assessment_score - tech_score > 20
+        ):
+            lines.append(
+                f"  ⚠ Risk score {risk_score:.2f}: Assessment {assessment_score:.1f}% vs "
+                f"Technical Interview {tech_score:.1f}% — manual review recommended."
+            )
+        elif tech_score is not None:
+            lines.append(f"  ⚠ Elevated risk score {risk_score:.2f} — manual review recommended.")
 
     return "\n".join(lines)
 
 
 def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
-    """Compute 4-component weighted total, cross-phase SHAP, and red flags."""
+    """Compute 4-component weighted total, cross-phase SHAP, and probabilistic risk scores."""
     if state.get("error"):
         return state
 
-    requisition_id    = state["requisition_id"]
-    applications      = state.get("applications", [])
-    weights           = state.get("weights", {
+    requisition_id     = state["requisition_id"]
+    applications       = state.get("applications", [])
+    weights            = state.get("weights", {
         "cv": 1.0, "assessment": 0.0, "tech_interview": 0.0, "hr_interview": 0.0,
     })
-    has_assessment    = state.get("has_assessment", False)
+    has_assessment     = state.get("has_assessment", False)
     has_tech_interview = state.get("has_tech_interview", False)
-    has_hr_interview  = state.get("has_hr_interview", False)
+    has_hr_interview   = state.get("has_hr_interview", False)
 
     db = SessionLocal()
     try:
-        scored: list[dict] = []
+        # ── Phase 1: collect raw scores for all candidates ────────────────────
+        raw: list[dict] = []
 
         for app in applications:
             app_id     = app["application_id"]
             posting_id = app["posting_id"]
             candidate  = app.get("candidate")
-            candidate_name = (
-                f"{getattr(candidate, 'first_name', '') or ''} "
-                f"{getattr(candidate, 'last_name', '') or ''}".strip()
-                or "Candidate"
-            )
 
-            # ── 1. Screening score (0-100) ─────────────────────────────────
             sem: SemanticAnalysisReport = (
                 db.query(SemanticAnalysisReport)
                 .filter(SemanticAnalysisReport.application_id == app_id)
@@ -156,7 +213,6 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
             )
             cv_score = float(sem.match_percentage) if sem else 0.0
 
-            # ── 2. Assessment score (0-100) ───────────────────────────────
             lb: AssessmentLeaderboard = (
                 db.query(AssessmentLeaderboard)
                 .filter(
@@ -170,9 +226,6 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
                 if lb and lb.final_score is not None else None
             )
 
-            # ── 3. Technical Interview score (0-100) ──────────────────────
-            # Prefer ensemble composite (computed by tech_interview_node).
-            # Fall back to overall_score if ensemble was not computed.
             tech_session: TechnicalInterviewSession = (
                 db.query(TechnicalInterviewSession)
                 .filter(
@@ -193,8 +246,6 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
             else:
                 tech_score = None
 
-            # ── 4. HR Interview score (0-100) ─────────────────────────────
-            # Prefer ensemble composite (computed by hr_analysis_node).
             hr_session: HRInterviewSession = (
                 db.query(HRInterviewSession)
                 .filter(
@@ -203,7 +254,8 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
                 )
                 .first()
             )
-            if hr_session and hr_session.emotion_score is not None:
+            # Use nli_align_score as sentinel (emotion excluded from composite)
+            if hr_session and hr_session.nli_align_score is not None:
                 hr_composite_01 = sum(
                     _HR_ENSEMBLE_WEIGHTS[feat]
                     * float(getattr(hr_session, feat) or 0)
@@ -215,7 +267,44 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
             else:
                 hr_score = None
 
-            # ── Weighted total ────────────────────────────────────────────
+            raw.append({
+                "application_id":  app_id,
+                "posting_id":      posting_id,
+                "candidate":       candidate,
+                "cv_score":        cv_score,
+                "assessment_score": assessment_score,
+                "tech_score":      tech_score,
+                "hr_score":        hr_score,
+            })
+
+        # ── Phase 2: pool-median baselines for SHAP ───────────────────────────
+        pool_med = _pool_medians(raw)
+        logger.info(
+            "[final_ranking:score] JR %d pool medians — CV=%.1f Assessment=%.1f Tech=%.1f HR=%.1f",
+            requisition_id,
+            pool_med["cv"], pool_med["assessment"],
+            pool_med["tech_interview"], pool_med["hr_interview"],
+        )
+
+        # ── Phase 3: score each candidate with medians and risk ───────────────
+        scored: list[dict] = []
+
+        for r in raw:
+            app_id          = r["application_id"]
+            posting_id      = r["posting_id"]
+            candidate       = r["candidate"]
+            cv_score        = r["cv_score"]
+            assessment_score = r["assessment_score"]
+            tech_score      = r["tech_score"]
+            hr_score        = r["hr_score"]
+
+            candidate_name = (
+                f"{getattr(candidate, 'first_name', '') or ''} "
+                f"{getattr(candidate, 'last_name', '') or ''}".strip()
+                or "Candidate"
+            )
+
+            # ── Weighted total ────────────────────────────────────────────────
             wtotal = weights["cv"] * cv_score
             if has_assessment:
                 wtotal += weights["assessment"] * (assessment_score or 0.0)
@@ -224,74 +313,45 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
             if has_hr_interview:
                 wtotal += weights["hr_interview"] * (hr_score or 0.0)
 
-            # ── Cross-phase SHAP (analytical, linear model) ───────────────
+            # ── Probabilistic risk score ──────────────────────────────────────
+            risk_score = _compute_risk_score(cv_score, assessment_score, tech_score)
+
+            # Soft penalty applied before final score (always, proportional to risk)
+            wtotal = round(wtotal * (1.0 - _RISK_SOFT_PENALTY * risk_score), 2)
+
+            red_flag        = risk_score >= _RISK_FLAG_THRESH
+            red_flag_reason = _risk_reason(risk_score, cv_score, assessment_score, tech_score)
+
+            if red_flag:
+                logger.warning(
+                    "[final_ranking:score] risk=%.2f app_id=%d JR=%d CV=%.1f "
+                    "tech=%s assessment=%s",
+                    risk_score, app_id, requisition_id, cv_score,
+                    f"{tech_score:.1f}" if tech_score is not None else "N/A",
+                    f"{assessment_score:.1f}" if assessment_score is not None else "N/A",
+                )
+
+            # ── Cross-phase SHAP (pool-median baseline) ───────────────────────
             w_cv   = weights.get("cv",             0.0)
             w_a    = weights.get("assessment",     0.0) if has_assessment     else 0.0
             w_tech = weights.get("tech_interview", 0.0) if has_tech_interview else 0.0
             w_hr   = weights.get("hr_interview",   0.0) if has_hr_interview   else 0.0
 
-            phi_cv   = round(w_cv   * (cv_score               / 100.0 - _SHAP_BASELINES["cv"]),             4)
-            phi_a    = round(w_a    * ((assessment_score or 0) / 100.0 - _SHAP_BASELINES["assessment"]),     4)
-            phi_tech = round(w_tech * ((tech_score or 0)       / 100.0 - _SHAP_BASELINES["tech_interview"]), 4)
-            phi_hr   = round(w_hr   * ((hr_score or 0)         / 100.0 - _SHAP_BASELINES["hr_interview"]),   4)
+            phi_cv   = round(w_cv   * (cv_score                / 100.0 - pool_med["cv"]             / 100.0), 4)
+            phi_a    = round(w_a    * ((assessment_score or 0)  / 100.0 - pool_med["assessment"]     / 100.0), 4)
+            phi_tech = round(w_tech * ((tech_score or 0)        / 100.0 - pool_med["tech_interview"] / 100.0), 4)
+            phi_hr   = round(w_hr   * ((hr_score or 0)          / 100.0 - pool_med["hr_interview"]   / 100.0), 4)
 
             shap_vals = {
-                "screening":       phi_cv,
-                "assessment":      phi_a,
-                "tech_interview":  phi_tech,
-                "hr_interview":    phi_hr,
+                "screening":      phi_cv,
+                "assessment":     phi_a,
+                "tech_interview": phi_tech,
+                "hr_interview":   phi_hr,
             }
             shap_json_str    = json.dumps(shap_vals)
             shap_summary_str = _cross_phase_summary(
-                shap_vals, candidate_name, assessment_score, tech_score
+                shap_vals, candidate_name, risk_score, assessment_score, tech_score
             )
-
-            # ── Red-flag detection ────────────────────────────────────────
-            red_flag        = False
-            red_flag_reason = None
-
-            # RF-1: strong CV but collapsed in live technical interview
-            if (
-                cv_score >= _RED_FLAG_CV_MIN
-                and tech_score is not None
-                and tech_score < _RED_FLAG_TECH_MIN
-            ):
-                red_flag = True
-                red_flag_reason = (
-                    f"RF-1 Interview Collapse: CV score {cv_score:.1f}% is strong, "
-                    f"but Technical Interview score {tech_score:.1f}% is below "
-                    f"threshold ({_RED_FLAG_TECH_MIN}%). Manual review required."
-                )
-                logger.warning(
-                    "[final_ranking:score] RF-1 app_id=%d JR=%d CV=%.1f%% tech=%.1f%%",
-                    app_id, requisition_id, cv_score, tech_score,
-                )
-
-            # RF-2: assessment score significantly higher than tech interview
-            # (may indicate cheating / assisted assessment)
-            if (
-                assessment_score is not None
-                and tech_score is not None
-                and assessment_score - tech_score > _RED_FLAG_CHEAT_GAP
-            ):
-                cheat_reason = (
-                    f"RF-2 Cheating Suspicion: Assessment score {assessment_score:.1f}% "
-                    f"exceeds Technical Interview score {tech_score:.1f}% by "
-                    f"{assessment_score - tech_score:.1f} points "
-                    f"(threshold: {_RED_FLAG_CHEAT_GAP}pts). Possible assisted assessment."
-                )
-                red_flag = True
-                red_flag_reason = (
-                    f"{red_flag_reason} | {cheat_reason}"
-                    if red_flag_reason else cheat_reason
-                )
-                logger.warning(
-                    "[final_ranking:score] RF-2 app_id=%d JR=%d "
-                    "assessment=%.1f%% tech=%.1f%% gap=%.1f%%",
-                    app_id, requisition_id,
-                    assessment_score, tech_score,
-                    assessment_score - tech_score,
-                )
 
             scored.append({
                 "application_id":            app_id,
@@ -300,7 +360,8 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
                 "assessment_score":          round(assessment_score, 2) if assessment_score is not None else None,
                 "technical_interview_score": round(tech_score, 2) if tech_score is not None else None,
                 "hr_interview_score":        round(hr_score, 2)   if hr_score   is not None else None,
-                "weighted_total_score":      round(wtotal, 2),
+                "weighted_total_score":      wtotal,
+                "risk_score":                round(risk_score, 4),
                 "shap_json":                 shap_json_str,
                 "shap_summary":              shap_summary_str,
                 "red_flag":                  red_flag,
@@ -309,13 +370,10 @@ def score_candidates_node(state: FinalRankingState) -> FinalRankingState:
             })
 
         logger.info(
-            "[final_ranking:score] JR %d — %d candidates scored, %d red flags "
-            "(%d RF-1 collapse, %d RF-2 cheat).",
+            "[final_ranking:score] JR %d — %d candidates scored, %d red flags.",
             requisition_id,
             len(scored),
             sum(1 for s in scored if s["red_flag"]),
-            sum(1 for s in scored if s["red_flag_reason"] and "RF-1" in s["red_flag_reason"]),
-            sum(1 for s in scored if s["red_flag_reason"] and "RF-2" in s["red_flag_reason"]),
         )
         return {**state, "scored": scored}
 

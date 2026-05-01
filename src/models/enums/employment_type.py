@@ -1,8 +1,1 @@
-import enum
-
-class EmploymentType(str, enum.Enum):
-    FULL_TIME = "Full-time"
-    PART_TIME = "Part-time"
-    CONTRACT = "Contract"
-    INTERNSHIP = "Internship"
-    FREELANCE = "Freelance"
+from enums.employment_type import EmploymentType  # noqa: F401

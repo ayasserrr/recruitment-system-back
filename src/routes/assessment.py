@@ -6,10 +6,10 @@ GET  /api/v1/assessment/{assessment_id}
      Requires ?token= from the invitation email.
 
 POST /api/v1/assessment/{assessment_id}/submit
-     Accepts candidate answers, runs the 4-node LangGraph AI-Grader pipeline
-     (load_submission → ai_grader → aggregate_scores → generate_report),
-     then dispatches a background Celery task to recalculate rank_in_pool
-     across all candidates for the same requisition.
+     Saves candidate answers; MCQ is exact-matched immediately, open-ended answers
+     are stored raw (score_awarded=NULL) and graded post-deadline by the relative
+     grading pipeline (scan_and_dispatch_assessment_ranking → run_relative_grading).
+     Returns immediately — no LLM call on the HTTP request thread.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from models.schemas.assessment_schema import (
     AssessmentSubmitResponse,
 )
 from services.assessment_graph import verify_assessment_token
-from services.grading_graph import run_grading_graph
 
 
 def _check_deadline(assessment: CandidateAssessment, db) -> None:
@@ -242,17 +241,30 @@ def get_assessment(
 # POST /api/v1/assessment/{assessment_id}/submit — AI Grader pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _grade_mcq_inline(candidate_answer: str, correct_answer: str, points: int) -> tuple[float, str]:
+    """Exact letter-match for MCQ — no LLM, sub-millisecond."""
+    def _letter(s: str) -> str:
+        s = s.strip().upper()
+        return s[0] if s and s[0] in "ABCD" else s
+
+    cand = _letter(candidate_answer)
+    correct = _letter(correct_answer or "")
+    if cand and cand == correct:
+        return float(points), "Correct answer."
+    return 0.0, f"Incorrect. The correct answer is '{correct}'." if correct else "Incorrect."
+
+
 @assessment_router.post("/{assessment_id}/submit", response_model=AssessmentSubmitResponse)
 def submit_assessment(assessment_id: int, payload: AssessmentSubmitRequest):
     """
-    Runs the full LangGraph AI-Grader pipeline:
-      Node 1 load_submission   – validates assessment, loads questions
-      Node 2 ai_grader         – MCQ exact-match / open-ended GPT-4o-mini
-      Node 3 aggregate_scores  – sums scores, marks passed, saves AssessmentAnswers
-      Node 4 generate_report   – GPT-4o-mini report → assessment_reports row
+    Saves candidate answers and returns immediately (no LLM on the request thread).
 
-    After the graph completes, dispatches recalculate_assessment_rankings
-    in the background so rank_in_pool is updated across all candidates.
+    MCQ: graded now via exact letter-match; score_awarded is stored.
+    Open-ended: saved as raw text with score_awarded=NULL; graded post-deadline
+      by the relative grading pipeline triggered by scan_and_dispatch_assessment_ranking.
+
+    The returned total_score reflects MCQ points only; passed=None until the
+    post-deadline pipeline resolves all open-ended scores.
     """
     if not verify_assessment_token(assessment_id, payload.token):
         raise HTTPException(
@@ -260,139 +272,123 @@ def submit_assessment(assessment_id: int, payload: AssessmentSubmitRequest):
             detail="Invalid or expired assessment link.",
         )
 
-    # Enforce deadline before running the expensive grading pipeline
-    _db = SessionLocal()
+    db = SessionLocal()
     try:
-        _assessment = (
-            _db.query(CandidateAssessment)
+        assessment: Optional[CandidateAssessment] = (
+            db.query(CandidateAssessment)
             .filter(CandidateAssessment.assessment_id == assessment_id)
             .first()
         )
-        if _assessment:
-            _check_deadline(_assessment, _db)
-    finally:
-        _db.close()
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Assessment not found.")
+        if assessment.status == "Submitted":
+            raise HTTPException(status_code=409, detail="Assessment already submitted.")
+        if not assessment.template_id:
+            raise HTTPException(status_code=404, detail="Assessment has no questions configured.")
 
-    # Convert payload to plain dicts for the graph
-    submitted_answers = [
-        {"question_id": a.question_id, "candidate_answer": a.candidate_answer}
-        for a in payload.answers
-    ]
+        _check_deadline(assessment, db)
 
-    # ── Run the 4-node grading graph ──────────────────────────────────────────
-    result = run_grading_graph(
-        assessment_id=assessment_id,
-        submitted_answers=submitted_answers,
-    )
-
-    if result.get("error"):
-        # Map known domain errors to appropriate HTTP status codes
-        err = result["error"]
-        if "not found" in err.lower():
-            raise HTTPException(status_code=404, detail=err)
-        if "already submitted" in err.lower():
-            raise HTTPException(status_code=409, detail=err)
-        raise HTTPException(status_code=422, detail=err)
-
-    # ── Dispatch background ranking recalculation ─────────────────────────────
-    _dispatch_ranking(assessment_id)
-
-    # ── Build response from graded answers ────────────────────────────────────
-    db = SessionLocal()
-    try:
-        answer_rows = (
-            db.query(AssessmentAnswer, AssessmentTemplateQuestion)
-            .join(
-                AssessmentTemplateQuestion,
-                AssessmentAnswer.question_id == AssessmentTemplateQuestion.question_id,
-            )
-            .filter(AssessmentAnswer.assessment_id == assessment_id)
+        # Load all template questions
+        tqs = (
+            db.query(AssessmentTemplateQuestion)
+            .filter(AssessmentTemplateQuestion.template_id == assessment.template_id)
             .all()
         )
-        answer_results = [
-            AnswerResult(
-                question_id=ans.question_id,
-                question_text=q.question_text,
-                question_type=q.question_type or "mcq",
-                candidate_answer=ans.candidate_answer or "",
-                score_awarded=float(ans.score_awarded or 0),
-                max_points=q.points,
-                ai_feedback=ans.ai_feedback or "",
-            )
-            for ans, q in answer_rows
-        ]
+        # Index submitted answers by question_id
+        submitted_map: dict[int, str] = {
+            a.question_id: a.candidate_answer for a in payload.answers
+        }
+
+        passing_score = float(assessment.passing_score) if assessment.passing_score else None
+        mcq_total = 0.0
+        answer_results: list[AnswerResult] = []
+
+        for tq in tqs:
+            qid = tq.question_id
+            qtype = (tq.question_type or "mcq").lower()
+            points = tq.points or 10
+            candidate_answer = submitted_map.get(qid, "")
+
+            # Delete any pre-existing answer row (idempotent re-submission guard)
+            db.query(AssessmentAnswer).filter(
+                AssessmentAnswer.assessment_id == assessment_id,
+                AssessmentAnswer.question_id == qid,
+            ).delete(synchronize_session=False)
+
+            if qtype == "mcq":
+                score, feedback = _grade_mcq_inline(
+                    candidate_answer, tq.correct_answer or "", points
+                )
+                mcq_total += score
+                db.add(AssessmentAnswer(
+                    assessment_id=assessment_id,
+                    question_id=qid,
+                    candidate_answer=candidate_answer,
+                    score_awarded=score,
+                    ai_feedback=feedback,
+                ))
+                answer_results.append(AnswerResult(
+                    question_id=qid,
+                    question_text=tq.question_text,
+                    question_type=qtype,
+                    candidate_answer=candidate_answer,
+                    score_awarded=score,
+                    max_points=points,
+                    ai_feedback=feedback,
+                ))
+            else:
+                # Open-ended: store raw, defer grading
+                db.add(AssessmentAnswer(
+                    assessment_id=assessment_id,
+                    question_id=qid,
+                    candidate_answer=candidate_answer,
+                    score_awarded=None,
+                    ai_feedback="Pending — graded after assessment deadline.",
+                ))
+                answer_results.append(AnswerResult(
+                    question_id=qid,
+                    question_text=tq.question_text,
+                    question_type=qtype,
+                    candidate_answer=candidate_answer,
+                    score_awarded=None,
+                    max_points=points,
+                    ai_feedback="Your answer has been saved and will be graded after the deadline.",
+                ))
+
+        assessment.status = "Submitted"
+        assessment.submitted_at = datetime.utcnow()
+        db.commit()
+
+        has_open_ended = any(r.question_type != "mcq" for r in answer_results)
+        grading_note = (
+            "MCQ answers have been graded. Open-ended answers will be graded after the "
+            "assessment deadline and included in the final ranking."
+            if has_open_ended else None
+        )
+
+        logger.info(
+            "[submit_assessment] Assessment %d saved — MCQ score %.1f, "
+            "%d open-ended deferred.",
+            assessment_id,
+            mcq_total,
+            sum(1 for r in answer_results if r.question_type != "mcq"),
+        )
+
+        return AssessmentSubmitResponse(
+            assessment_id=assessment_id,
+            status="Submitted",
+            total_score=mcq_total,
+            passing_score=passing_score,
+            passed=None,
+            answers=answer_results,
+            report=None,
+            grading_note=grading_note,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.exception("[submit_assessment] Unexpected error for assessment %d.", assessment_id)
+        raise HTTPException(status_code=500, detail=str(exc))
     finally:
         db.close()
-
-    report_response = None
-    if result.get("report_id"):
-        report_response = AssessmentReportResponse(
-            report_id=result["report_id"],
-            overall_score=result["total_score"],
-            strengths=result["strengths"],
-            weaknesses=result["weaknesses"],
-            ai_feedback=result["ai_feedback"],
-            recommendation=result["recommendation"],
-        )
-
-    logger.info(
-        "[submit_assessment] Assessment %d complete — %.1f/%.0f (%.1f%%), passed=%s.",
-        assessment_id,
-        result["total_score"],
-        result["total_possible"],
-        result["score_pct"],
-        result["passed"],
-    )
-
-    return AssessmentSubmitResponse(
-        assessment_id=assessment_id,
-        status="Submitted",
-        total_score=result["total_score"],
-        passing_score=result["passing_score"],
-        passed=result["passed"],
-        answers=answer_results,
-        report=report_response,
-    )
-
-
-def _dispatch_ranking(assessment_id: int) -> None:
-    """
-    Look up the requisition_id for this assessment and fire
-    recalculate_assessment_rankings in the background.
-    Silently swallows errors so submission never fails because of this.
-    """
-    try:
-        db = SessionLocal()
-        try:
-            assessment = (
-                db.query(CandidateAssessment)
-                .filter(CandidateAssessment.assessment_id == assessment_id)
-                .first()
-            )
-            if not assessment:
-                return
-            app = (
-                db.query(Application)
-                .filter(Application.application_id == assessment.application_id)
-                .first()
-            )
-            if not app:
-                return
-            posting = (
-                db.query(JobPosting)
-                .filter(JobPosting.posting_id == app.posting_id)
-                .first()
-            )
-            if not posting:
-                return
-            requisition_id = posting.requisition_id
-        finally:
-            db.close()
-
-        from tasks.assessment_tasks import recalculate_assessment_rankings
-        recalculate_assessment_rankings.delay(requisition_id)
-        logger.info(
-            "[submit_assessment] Dispatched ranking recalculation for requisition %d.", requisition_id
-        )
-    except Exception as exc:
-        logger.warning("[submit_assessment] Could not dispatch ranking task: %s", exc)

@@ -51,7 +51,7 @@ from livekit.agents import (
     AgentSession,
     AutoSubscribe,
     JobContext,
-    RoomInputOptions,
+    RoomOptions,
     WorkerOptions,
     cli,
     function_tool,
@@ -465,7 +465,7 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(
         agent,
         room=ctx.room,
-        room_input_options=RoomInputOptions(audio_enabled=True),
+        room_options=RoomOptions(audio_enabled=True),
     )
     await session.wait_for_inactive()
 
@@ -514,20 +514,49 @@ def _load_questions_sync(
 ) -> list[str]:
     """
     Synchronous helper (runs in a thread via asyncio.to_thread).
-    Loads personalised questions from FocusedInterviewerPersona.
-    Falls back to generic questions on any error.
+
+    Strategy (zero LLM calls):
+    1. Load candidate gaps + JR knowledge gaps + project info from DB
+    2. Use knowledge_base_service to build 5 gap-targeted questions via
+       DB embeddings + MiniLM cosine retrieval; logs selections to jr_question_selections
+    3. Falls back to FocusedInterviewerPersona templates if retrieval fails
+    4. Falls back to generic questions if persona fails
     """
     if not application_id:
         return _generic_questions(job_title)
 
+    # ── Attempt 1: knowledge base DB retrieval (no LLM) ──────────────────────
+    try:
+        from services.knowledge_base_service import (
+            load_candidate_gaps_sync,
+            get_all_five_questions,
+        )
+        gap_data  = load_candidate_gaps_sync(application_id)
+        questions = get_all_five_questions(
+            gaps=gap_data["gaps"],
+            jr_knowledge_gaps=gap_data["jr_knowledge_gaps"],
+            project_name=gap_data["project_name"],
+            main_tech=gap_data["main_tech"],
+            job_title=gap_data["job_title"] or job_title,
+            application_id=application_id,
+            requisition_id=gap_data.get("requisition_id"),
+        )
+        logger.info(
+            "[agent-worker] Loaded %d DB-targeted questions for app %d.",
+            len(questions), application_id,
+        )
+        return questions
+    except Exception as exc:
+        logger.warning(
+            "[agent-worker] knowledge_base_service failed (%s) — falling back to persona.", exc
+        )
+
+    # ── Attempt 2: FocusedInterviewerPersona templates ───────────────────────
     try:
         from services.focused_interviewer_persona import FocusedInterviewerPersona
         import asyncio
 
         persona = FocusedInterviewerPersona()
-
-        # load_focused_interview_metadata is declared async but only does sync
-        # DB work — run it in a new event loop inside the thread.
         loop = asyncio.new_event_loop()
         try:
             meta = loop.run_until_complete(
@@ -538,15 +567,14 @@ def _load_questions_sync(
 
         return [
             persona.generate_round_1_question(meta),
-            persona.generate_round_2_question(meta, ""),   # LLM adapts naturally in context
+            persona.generate_round_2_question(meta, ""),
             persona.generate_round_3_question(meta),
             persona.generate_round_4_question(meta),
             persona.generate_round_5_question(meta),
         ]
     except Exception as exc:
         logger.warning(
-            "[agent-worker] Could not load personalised questions (%s) — using generics.",
-            exc,
+            "[agent-worker] Persona fallback also failed (%s) — using generics.", exc
         )
         return _generic_questions(job_title)
 
@@ -645,6 +673,68 @@ def _load_hr_questions_sync(application_id: Optional[int], job_title: str) -> li
     return _hr_generic_questions(job_title)
 
 
+# ── Transcript quality assessment ─────────────────────────────────────────────
+
+def _assess_transcript_quality(transcript: str) -> dict:
+    """
+    Compute simple quality signals from the raw transcript.
+
+    Returns:
+        turn_count        — number of non-empty candidate turns detected
+        avg_words_per_turn — mean word count across candidate turns
+        quality_flag      — 'ok' | 'low_quality' | 'very_low_quality'
+        quality_note      — human-readable note appended to session summary
+    """
+    if not transcript or not transcript.strip():
+        return {
+            "turn_count": 0,
+            "avg_words_per_turn": 0.0,
+            "quality_flag": "very_low_quality",
+            "quality_note": "[Quality: no transcript captured]",
+        }
+
+    import re
+    # Try labeled format first ("Candidate: ..." lines)
+    candidate_pattern = re.compile(
+        r"(?:candidate|applicant|interviewee)\s*:\s*(.+?)(?=\n(?:interviewer|hr|recruiter|agent)\s*:|$)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    turns = [m.strip() for m in candidate_pattern.findall(transcript) if m.strip()]
+    if not turns:
+        # Fallback: every other non-empty line (assume interviewer speaks first)
+        lines = [l.strip() for l in transcript.split("\n") if l.strip()]
+        turns = [lines[i] for i in range(1, len(lines), 2)]
+
+    turn_count = len(turns)
+    if turn_count == 0:
+        avg_words = 0.0
+    else:
+        avg_words = round(sum(len(t.split()) for t in turns) / turn_count, 1)
+
+    if turn_count < 2 or avg_words < 10:
+        flag = "very_low_quality"
+        note = (
+            f"[Quality: very_low — {turn_count} candidate turns, "
+            f"{avg_words:.0f} words/turn avg. Scores may be unreliable.]"
+        )
+    elif turn_count < 4 or avg_words < 20:
+        flag = "low_quality"
+        note = (
+            f"[Quality: low — {turn_count} candidate turns, "
+            f"{avg_words:.0f} words/turn avg. Consider manual review.]"
+        )
+    else:
+        flag = "ok"
+        note = f"[Quality: ok — {turn_count} turns, {avg_words:.0f} words/turn avg]"
+
+    return {
+        "turn_count": turn_count,
+        "avg_words_per_turn": avg_words,
+        "quality_flag": flag,
+        "quality_note": note,
+    }
+
+
 # ── Helper: persist final results to DB ──────────────────────────────────────
 
 def _persist_completion(
@@ -704,19 +794,27 @@ def _persist_completion(
                 "[agent-worker] Tech ensemble scoring failed — falling back to LLM score: %s", exc
             )
 
+        # ── Transcript quality assessment ─────────────────────────────────────
+        quality = _assess_transcript_quality(transcript)
+        if quality["quality_flag"] != "ok":
+            logger.warning(
+                "[agent-worker] Low-quality transcript for session %d: %s",
+                db_session_id, quality["quality_note"],
+            )
+        full_summary = f"{summary}\n{quality['quality_note']}"
+
         row.status = "Completed"
         row.overall_score = final_score
         row.overall_performance = _tier_label(final_score)
         row.recommendation = _recommendation(final_score)
-        row.summary = summary
+        row.summary = full_summary
         row.transcript = transcript
         row.ended_at = datetime.utcnow()
         db.commit()
 
         logger.info(
-            "[agent-worker] Persisted Completed for session %d (score=%.2f).",
-            db_session_id,
-            final_score,
+            "[agent-worker] Persisted Completed for session %d (score=%.2f, quality=%s).",
+            db_session_id, final_score, quality["quality_flag"],
         )
 
     except Exception:
@@ -724,8 +822,16 @@ def _persist_completion(
         logger.exception(
             "[agent-worker] DB error while persisting session %d.", db_session_id
         )
+        return
     finally:
         db.close()
+
+    # Generate full technical report (no LLM)
+    try:
+        from services.report_generation_service import generate_technical_report
+        generate_technical_report(db_session_id)
+    except Exception as exc:
+        logger.warning("[agent-worker] Technical report generation failed: %s", exc)
 
     # Fire final-ranking check asynchronously so DB write isn't blocked
     if requisition_id:
@@ -799,18 +905,28 @@ def _persist_completion_hr(
             logger.error("[agent-worker] HRInterviewSession %d not found — cannot persist.", db_session_id)
             return
 
+        # ── Transcript quality assessment ─────────────────────────────────────
+        quality = _assess_transcript_quality(transcript)
+        if quality["quality_flag"] != "ok":
+            logger.warning(
+                "[agent-worker] Low-quality HR transcript for session %d: %s",
+                db_session_id, quality["quality_note"],
+            )
+        full_summary = f"{summary}\n{quality['quality_note']}"
+
         row.status = "Completed"
-        row.overall_score = overall_score
-        row.overall_performance = _tier_label(overall_score)
-        row.recommendation = _recommendation(overall_score)
-        row.summary = summary
+        row.summary = full_summary
         row.transcript = transcript
         row.ended_at = datetime.utcnow()
         db.commit()
 
-        logger.info("[agent-worker] HR session %d persisted (score=%.2f).", db_session_id, overall_score)
+        logger.info(
+            "[agent-worker] HR session %d base fields persisted (quality=%s).",
+            db_session_id, quality["quality_flag"],
+        )
 
-        # Run 4-model ensemble scoring on the transcript
+        # ── 4-model ensemble scoring (replaces LLM overall_score) ────────────
+        final_hr_score = overall_score  # LLM fallback
         try:
             from services.hr_analysis_service import score_transcript
             scores = score_transcript(
@@ -819,22 +935,47 @@ def _persist_completion_hr(
                 job_responsibilities=job_responsibilities,
                 candidate_name=candidate_name,
             )
-            row.emotion_score = scores.get("emotion_score")
-            row.sentiment_score = scores.get("sentiment_score")
-            row.nli_align_score = scores.get("nli_align_score")
+            ensemble_composite = scores.get("composite_score", 0.0)
+            final_hr_score = round(ensemble_composite * 100, 2)  # 0-100
+
+            row.emotion_score        = scores.get("emotion_score")
+            row.sentiment_score      = scores.get("sentiment_score")
+            row.nli_align_score      = scores.get("nli_align_score")
             row.semantic_depth_score = scores.get("semantic_depth_score")
-            row.shap_json = scores.get("shap_json")
-            row.shap_summary = scores.get("shap_summary")
-            db.commit()
-            logger.info("[agent-worker] HR ensemble scores saved for session %d.", db_session_id)
+            row.shap_json            = scores.get("shap_json")
+            row.shap_summary         = scores.get("shap_summary")
+            logger.info(
+                "[agent-worker] HR ensemble score=%.2f (LLM was %.2f) for session %d.",
+                final_hr_score, overall_score, db_session_id,
+            )
         except Exception as exc:
-            logger.warning("[agent-worker] HR ensemble scoring failed for session %d: %s", db_session_id, exc)
+            logger.warning(
+                "[agent-worker] HR ensemble scoring failed for session %d — keeping LLM score: %s",
+                db_session_id, exc,
+            )
+
+        row.overall_score       = final_hr_score
+        row.overall_performance = _tier_label(final_hr_score)
+        row.recommendation      = _recommendation(final_hr_score)
+        db.commit()
+        logger.info(
+            "[agent-worker] HR session %d final score=%.2f (%s).",
+            db_session_id, final_hr_score, _tier_label(final_hr_score),
+        )
 
     except Exception:
         db.rollback()
         logger.exception("[agent-worker] DB error while persisting HR session %d.", db_session_id)
+        return
     finally:
         db.close()
+
+    # Generate full HR report (no LLM)
+    try:
+        from services.report_generation_service import generate_hr_report
+        generate_hr_report(db_session_id)
+    except Exception as exc:
+        logger.warning("[agent-worker] HR report generation failed: %s", exc)
 
     if requisition_id:
         try:

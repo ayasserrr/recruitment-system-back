@@ -285,39 +285,36 @@ class FocusedInterviewerPersona:
     def generate_round_3_question(self, metadata: FocusedInterviewMetadata) -> str:
         """
         Round 3: Skill-Gap Bridge
-        Target specific skill gap through project context
+        Uses semantic retrieval from the question bank to target the
+        candidate's most critical skill gap. Falls back to a project-context
+        template if the encoder is unavailable.
         """
+        try:
+            from services.question_bank_service import get_gap_targeted_question
+            return get_gap_targeted_question(
+                gaps=metadata.identified_gaps or [],
+                jr_knowledge_gaps=[],  # already merged into identified_gaps at load time
+                project_tech_stacks=[
+                    tech
+                    for proj in (metadata.projects or [])
+                    for tech in proj.get("tech_stack", [])
+                ],
+                job_title=metadata.job_title,
+            )
+        except Exception as exc:
+            logger.warning("[persona] question_bank fallback for Round 3: %s", exc)
+
         if not metadata.identified_gaps:
-            # If no gaps, focus on technical challenge
-            return "Looking at your projects, what was the most challenging technical problem you solved, and how did you approach it?"
-        
-        # Select primary gap
+            return (
+                "Looking at your projects, what was the most challenging technical "
+                "problem you solved, and how did you approach it?"
+            )
         gap = metadata.identified_gaps[0]
-        
-        # Find relevant project
-        relevant_project = None
-        for proj in metadata.projects:
-            tech_stack = [tech.lower() for tech in proj.get("tech_stack", [])]
-            if any(gap_term in " ".join(tech_stack) for gap_term in gap.lower().split()):
-                relevant_project = proj
-                break
-        
-        if relevant_project:
-            project_name = relevant_project["project_name"]
-            # Map gaps to specific technical areas
-            gap_mapping = {
-                "docker": "container orchestration",
-                "security": "security implementation",
-                "scaling": "scaling challenges",
-                "performance": "performance optimization",
-                "database": "data management"
-            }
-            
-            gap_area = gap_mapping.get(gap.lower(), gap)
-            
-            return f"I see you used technologies in {project_name}. How did you handle {gap_area} during that phase?"
-        else:
-            return f"I'd like to explore your experience with {gap}. Can you describe a project where you applied these concepts?"
+        return (
+            f"I'd like to explore your experience with {gap}. "
+            "Can you describe a specific situation where you worked with this area, "
+            "what challenges came up, and how you resolved them?"
+        )
     
     def generate_round_4_question(self, metadata: FocusedInterviewMetadata) -> str:
         """

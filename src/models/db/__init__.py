@@ -38,3 +38,7 @@ from models.db.assessment_question_set import AssessmentQuestionSet
 from models.db.assessment_leaderboard import AssessmentLeaderboard
 from models.db.jr_knowledge_gap import JrKnowledgeGap
 from models.db.shortlisted_candidate import ShortlistedCandidate
+from models.db.kb_topic import KbTopic
+from models.db.kb_question import KbQuestion
+from models.db.kb_question_embedding import KbQuestionEmbedding
+from models.db.jr_question_selection import JrQuestionSelection

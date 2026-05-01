@@ -1,7 +1,4 @@
-import enum
+from enums.processing_status import ProcessingStatus  # noqa: F401
 
-class PipelineStatus(str, enum.Enum):
-    PASSED = "Passed"
-    FAILED = "Failed"
-    PENDING = "Pending"
-    SKIPPED = "Skipped"
+# Legacy name kept for any existing imports
+PipelineStatus = ProcessingStatus

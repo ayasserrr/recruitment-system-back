@@ -1,6 +1,1 @@
-import enum
-
-class RequisitionStatus(str, enum.Enum):
-    DRAFT = "Draft"
-    ACTIVE = "Active"
-    CLOSED = "Closed"
+from enums.requisition_status import RequisitionStatus  # noqa: F401

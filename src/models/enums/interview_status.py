@@ -1,7 +1,1 @@
-import enum
-
-class InterviewStatus(str, enum.Enum):
-    SCHEDULED = "Scheduled"
-    DONE = "Done"
-    CANCELLED = "Cancelled"
-    NO_SHOW = "No Show"
+from enums.interview_status import InterviewStatus  # noqa: F401
