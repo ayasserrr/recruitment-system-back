@@ -51,11 +51,11 @@ from livekit.agents import (
     AgentSession,
     AutoSubscribe,
     JobContext,
-    RoomOptions,
     WorkerOptions,
     cli,
     function_tool,
 )
+from livekit.agents.voice.room_io import RoomOptions
 from livekit.plugins import openai as lk_openai
 from livekit.plugins import silero
 
@@ -284,8 +284,8 @@ class RecruitmentInterviewAgent(Agent):
     async def on_enter(self) -> None:
         """
         Called by the framework when this agent enters an AgentSession.
-        Starts the silence watchdog in the background.
-        The LLM will immediately produce the greeting from the system prompt.
+        Only starts the silence watchdog here — greeting is triggered by the
+        entrypoint once the candidate's participant is confirmed in the room.
         """
         asyncio.create_task(self._silence_watchdog(), name="silence-watchdog")
         logger.info(
@@ -293,6 +293,26 @@ class RecruitmentInterviewAgent(Agent):
             self._candidate_name,
             self._db_session_id,
         )
+
+    async def greet_and_start(self) -> None:
+        """Deliver the opening greeting then hand off to the LLM."""
+        await asyncio.sleep(0.8)  # let the audio track subscription settle
+        try:
+            await self.session.say(
+                f"Hello {self._candidate_name}, I am your AI interviewer for the "
+                f"{self._job_title} role. It's great to have you here today.",
+                allow_interruptions=False,
+            )
+            self.session.generate_reply(
+                instructions=(
+                    "The greeting has been delivered. Now ask the warm-up question "
+                    "exactly as specified in your instructions, then proceed through "
+                    "the 5 technical questions."
+                )
+            )
+        except Exception as exc:
+            logger.error("[agent] Failed to deliver greeting for session %d: %s",
+                         self._db_session_id, exc)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -449,13 +469,30 @@ async def entrypoint(ctx: JobContext) -> None:
         if text.strip():
             agent._transcript_parts.append(f"Interviewer: {text.strip()}")
 
+    # ── Greeting gate — fires exactly once when the candidate joins ───────────
+    # LiveKit audio is not buffered: if the agent speaks before the candidate's
+    # subscription is ready, the audio is lost.  We trigger the greeting only
+    # when we have confirmed a candidate participant in the room.
+    _greeted = False
+
+    def _maybe_greet(participant) -> None:
+        nonlocal _greeted
+        if _greeted:
+            return
+        if not participant.identity.startswith("candidate_"):
+            return
+        _greeted = True
+        logger.info(
+            "[agent-worker] Candidate '%s' confirmed in room — delivering greeting.",
+            participant.identity,
+        )
+        asyncio.create_task(agent.greet_and_start(), name="greeting")
+
     # ── Candidate-disconnect handler ──────────────────────────────────────────
-    # If the candidate closes their browser mid-interview, give them a 15-second
-    # grace period (transient network drop) then mark No-show and close the room.
     @ctx.room.on("participant_disconnected")
     def _on_participant_disconnected(participant) -> None:
         if not participant.identity.startswith("candidate_"):
-            return  # ignore agent or other system participants
+            return
         if not agent._interview_done:
             asyncio.create_task(
                 _handle_candidate_disconnect(ctx, agent),
@@ -465,8 +502,49 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(
         agent,
         room=ctx.room,
-        room_options=RoomOptions(audio_enabled=True),
+        room_options=RoomOptions(audio_input=True, audio_output=True),
     )
+
+    # ── Trigger greeting ──────────────────────────────────────────────────────
+    # Dump all participants visible right now for diagnostics
+    all_remote = list(ctx.room.remote_participants.values())
+    logger.info(
+        "[agent-worker] After session.start — remote participants: %s",
+        [p.identity for p in all_remote],
+    )
+
+    # Case 1: candidate already in room when session starts
+    for p in all_remote:
+        _maybe_greet(p)
+
+    # Case 2: candidate joins after session starts
+    ctx.room.on("participant_connected")(_maybe_greet)
+
+    # Fallback: poll every 1 s for up to 30 s in case participant_connected
+    # event was missed or candidate was in mid-connect during session.start()
+    async def _greeting_watchdog() -> None:
+        for _ in range(30):
+            await asyncio.sleep(1.0)
+            if _greeted:
+                return
+            current = list(ctx.room.remote_participants.values())
+            logger.info(
+                "[agent-worker] Greeting watchdog tick — remote participants: %s",
+                [p.identity for p in current],
+            )
+            for p in current:
+                _maybe_greet(p)
+            if _greeted:
+                return
+        if not _greeted:
+            logger.warning(
+                "[agent-worker] No candidate joined after 30 s — forcing greeting for session %d.",
+                db_session_id,
+            )
+            asyncio.create_task(agent.greet_and_start(), name="greeting-forced")
+
+    asyncio.create_task(_greeting_watchdog(), name="greeting-watchdog")
+
     await session.wait_for_inactive()
 
 

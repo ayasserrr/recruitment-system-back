@@ -435,7 +435,13 @@ def _generate_livekit_token(
         AccessToken(api_key=api_key, api_secret=api_secret)
         .with_identity(participant_identity)
         .with_name(participant_name)
-        .with_grants(VideoGrants(room_join=True, room=room_name))
+        .with_grants(VideoGrants(
+            room_join=True,
+            room=room_name,
+            can_publish=True,
+            can_subscribe=True,
+            can_publish_data=True,
+        ))
         .to_jwt()
     )
     return token

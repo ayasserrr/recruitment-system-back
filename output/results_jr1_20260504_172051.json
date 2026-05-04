@@ -1,0 +1,172 @@
+{
+  "jr_id": 1,
+  "generated_at": "2026-05-04T17:20:51.329987",
+  "leaderboard": [
+    {
+      "name": "Ayasser Ahmed",
+      "candidate_id": 2,
+      "application_id": 2,
+      "assessment_id": 2,
+      "final_score": 0.0,
+      "avg_depth": 0.0,
+      "reject": true,
+      "reject_reason": "Low keyword coverage and insufficient explanation depth",
+      "segment": "\u274c Auto-Reject",
+      "rank": null,
+      "per_question": {
+        "Basic Routes (GET POST PUT DELETE)": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "FastAPI",
+            "Flask",
+            "data validation",
+            "asynchronous",
+            "performance"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Path & Query Parameters": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Request Body + Pydantic Models": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Response Models": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "response model",
+            "nested data",
+            "Pydantic",
+            "FastAPI",
+            "data structure"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Data Structures": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "list comprehensions",
+            "existing list",
+            "expression",
+            "iterable"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "Functions & Scope": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "*args",
+            "**kwargs",
+            "flexible arguments",
+            "tuple",
+            "dictionary"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        },
+        "OOP Basics": {
+          "coverage_score": 0.0,
+          "matched_keywords": [],
+          "missing_keywords": [
+            "override",
+            "parent class",
+            "child class",
+            "super()"
+          ],
+          "semantic_recovered": [],
+          "match_count": 0,
+          "coverage_norm": 0.0,
+          "depth_score": 0.0,
+          "comparative_score": 0.0,
+          "is_external": false
+        }
+      }
+    }
+  ],
+  "keyword_gap_report": {
+    "Basic Routes (GET POST PUT DELETE)": [
+      "FastAPI",
+      "Flask",
+      "data validation",
+      "asynchronous",
+      "performance"
+    ],
+    "Path & Query Parameters": [
+      "optional",
+      "query parameters",
+      "FastAPI",
+      "None"
+    ],
+    "Request Body + Pydantic Models": [
+      "Pydantic",
+      "required field",
+      "default value",
+      "request body"
+    ],
+    "Response Models": [
+      "response model",
+      "nested data",
+      "Pydantic",
+      "FastAPI",
+      "data structure"
+    ],
+    "Data Structures": [
+      "list comprehensions",
+      "existing list",
+      "expression",
+      "iterable"
+    ],
+    "Functions & Scope": [
+      "*args",
+      "**kwargs",
+      "flexible arguments",
+      "tuple",
+      "dictionary"
+    ],
+    "OOP Basics": [
+      "override",
+      "parent class",
+      "child class",
+      "super()"
+    ]
+  }
+}

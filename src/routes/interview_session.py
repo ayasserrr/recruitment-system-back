@@ -300,10 +300,22 @@ async def _create_livekit_room(room_name: str, metadata: dict, agent_name: str |
             api_key=cfg.LIVEKIT_API_KEY,
             api_secret=cfg.LIVEKIT_API_SECRET,
         ) as lk:
+            # Only store fields the agent worker reads from ctx.room.metadata.
+            # Large blobs (cvText, jd, projects) cause create_room to fail silently.
+            agent_room_metadata = {
+                "session_id":          metadata.get("session_id"),
+                "application_id":      metadata.get("application_id"),
+                "candidate_name":      metadata.get("candidate_name"),
+                "job_title":           metadata.get("job_title"),
+                "requisition_id":      metadata.get("requisition_id"),
+                "mode":                metadata.get("mode", "technical"),
+                "language":            metadata.get("language", "en"),
+                "job_responsibilities": metadata.get("job_responsibilities", ""),
+            }
             await lk.room.create_room(
                 CreateRoomRequest(
                     name=room_name,
-                    metadata=json.dumps(metadata, ensure_ascii=False),
+                    metadata=json.dumps(agent_room_metadata),
                     empty_timeout=300,
                     max_participants=10,
                 )
@@ -315,19 +327,29 @@ async def _create_livekit_room(room_name: str, metadata: dict, agent_name: str |
             try:
                 from livekit.api import CreateAgentDispatchRequest  # type: ignore
                 resolved_agent = agent_name or cfg.LIVEKIT_AGENT_NAME
+                # Pass only essential IDs — agent reads full metadata from ctx.room.metadata.
+                # Large payloads (cvText, jd, etc.) cause the dispatch API call to fail.
+                minimal_meta = json.dumps({
+                    "session_id":     metadata.get("session_id"),
+                    "application_id": metadata.get("application_id"),
+                    "candidate_name": metadata.get("candidate_name"),
+                    "job_title":      metadata.get("job_title"),
+                    "requisition_id": metadata.get("requisition_id"),
+                    "mode":           metadata.get("mode", "technical"),
+                })
                 await lk.agent_dispatch.create_dispatch(
                     CreateAgentDispatchRequest(
                         agent_name=resolved_agent,
                         room=room_name,
-                        metadata=json.dumps(metadata, ensure_ascii=False),
+                        metadata=minimal_meta,
                     )
                 )
                 logger.info("[livekit] Agent '%s' dispatched to room '%s'.", resolved_agent, room_name)
             except Exception as dispatch_exc:
-                logger.warning("[livekit] Agent dispatch failed (agent may auto-join instead): %s", dispatch_exc)
+                logger.error("[livekit] Agent dispatch FAILED for room '%s': %s", room_name, dispatch_exc)
 
     except Exception as exc:
-        logger.warning("[livekit] Room creation failed (will still return token): %s", exc)
+        logger.error("[livekit] Room creation FAILED for room '%s': %s", room_name, exc)
 
 
 def _generate_access_token(room_name: str, identity: str, display_name: str) -> tuple[str, str]:
@@ -551,27 +573,9 @@ async def start_interview(
             ),
         )
 
-    # ── Scheduled: not yet started — re-generate token for same room ─────────
-    if (
-        existing_session
-        and existing_session.status == _STATUS_SCHEDULED
-        and getattr(existing_session, "room_name", None) == room_name
-    ):
-        token, expires_at = _generate_access_token(
-            room_name=room_name,
-            identity=f"candidate_{candidate.candidate_id}",
-            display_name=f"{candidate.first_name} {candidate.last_name}",
-        )
-        return StartInterviewResponse(
-            session_id=existing_session.session_id,
-            room_name=room_name,
-            access_token=token,
-            livekit_url=cfg.LIVEKIT_URL,
-            status=existing_session.status,
-            expires_at=expires_at,
-        )
-
     # ── Load Semantic Analysis for gaps/strengths ─────────────────────────────
+    # NOTE: No early-return for Scheduled — always create/re-create the room and
+    # re-dispatch the agent so the candidate's click always triggers a live session.
     sem_report: SemanticAnalysisReport = (
         db.query(SemanticAnalysisReport)
         .filter(SemanticAnalysisReport.application_id == application.application_id)
@@ -681,8 +685,13 @@ async def start_interview(
     db.flush()  # get session.session_id before room creation
     room_metadata["session_id"] = session.session_id
 
-    # ── Create LiveKit room with complete metadata ─────────────────────────────
+    # ── Create LiveKit room + dispatch agent ──────────────────────────────────
     agent_name = cfg.LIVEKIT_HR_AGENT_NAME if is_hr else cfg.LIVEKIT_AGENT_NAME
+    logger.info(
+        "[interview_start] Creating LiveKit room '%s' and dispatching agent '%s' "
+        "(session_id=%d, mode=%s).",
+        room_name, agent_name, session.session_id, request.mode,
+    )
     await _create_livekit_room(room_name, room_metadata, agent_name=agent_name)
 
     # ── Generate candidate access token ───────────────────────────────────────
