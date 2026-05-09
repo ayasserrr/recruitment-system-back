@@ -1,0 +1,329 @@
+{
+  "jr_id": 1,
+  "generated_at": "2026-05-04T19:40:42.288788",
+  "job_title": "AI Intern (Computer Vision & NLP Focus)",
+  "ranked_candidates": [
+    {
+      "application_id": 1,
+      "candidate_id": 1,
+      "candidate_name": "ahmed ayman",
+      "email": "225119@eru.edu.eg",
+      "rank_in_pool": 1,
+      "total_in_pool": 4,
+      "final_score": 63.43,
+      "recommendation": "Top Candidate",
+      "ce_logit": 0.226,
+      "ce_prob": 0.5563,
+      "hybrid_score": 0.4704,
+      "hr_explanation_json": {
+        "candidate_id": 1,
+        "candidate_name": "ahmed ayman",
+        "jd_id": 1,
+        "jd_title": "AI Intern (Computer Vision & NLP Focus)",
+        "rank": 1,
+        "pool_size": 4,
+        "match_score": 56,
+        "ce_logit": 0.226,
+        "ce_probability": 0.5563,
+        "pipeline_score": 63.43,
+        "pool_label": "Top Candidate",
+        "gt_label": null,
+        "cv_years": 1,
+        "required_years": 0,
+        "top_positive_signals": [],
+        "top_negative_signals": [],
+        "matched_jd_skills": [
+          "Python",
+          "Git",
+          "Scikit-learn"
+        ],
+        "missing_jd_skills": [],
+        "strengths": [
+          "Strong hands-on experience in Machine Learning, Deep Learning, and Natural Language Processing.",
+          "Proficient in required technologies including Python, TensorFlow, PyTorch, Scikit-learn, and FastAPI.",
+          "Experience with real-world projects demonstrating the ability to develop and deploy AI solutions.",
+          "GenAI evidence found (rag, langchain, llm) — context: production"
+        ],
+        "gaps": [
+          "No explicit mention of experience with Canva for presentation of data insights.",
+          "Limited experience duration (only 4 months as an intern) may affect depth of practical knowledge."
+        ],
+        "recommendation": "screening_call",
+        "interview_focus": [
+          "Can you describe a specific challenge you faced while developing an AI model and how you overcame it?",
+          "How do you approach data preprocessing and what techniques do you find most effective?",
+          "What is your experience with version control workflows using Git in collaborative projects?"
+        ],
+        "genai_evidence": [
+          "rag",
+          "langchain",
+          "llm",
+          "mlops",
+          "model deployment",
+          "hugging face",
+          "prompt engineering",
+          "llama"
+        ],
+        "scoring_mode": "Student Mode",
+        "feature_attribution": [
+          {
+            "feature": "project_depth",
+            "contribution": 29.75
+          },
+          {
+            "feature": "education_fit",
+            "contribution": 15.72
+          },
+          {
+            "feature": "genai_bonus",
+            "contribution": 15.0
+          },
+          {
+            "feature": "technical_match",
+            "contribution": 9.45
+          },
+          {
+            "feature": "project_complexity_boost",
+            "contribution": 4.5
+          }
+        ]
+      }
+    },
+    {
+      "application_id": 2,
+      "candidate_id": 2,
+      "candidate_name": "Ayasser Ahmed",
+      "email": "ayasser.tawfik@gmail.com",
+      "rank_in_pool": 2,
+      "total_in_pool": 4,
+      "final_score": 58.02,
+      "recommendation": "Strong Runner-Up",
+      "ce_logit": 0.6987,
+      "ce_prob": 0.6679,
+      "hybrid_score": 0.5305,
+      "hr_explanation_json": {
+        "candidate_id": 2,
+        "candidate_name": "Ayasser Ahmed",
+        "jd_id": 1,
+        "jd_title": "AI Intern (Computer Vision & NLP Focus)",
+        "rank": 2,
+        "pool_size": 4,
+        "match_score": 67,
+        "ce_logit": 0.6987,
+        "ce_probability": 0.6679,
+        "pipeline_score": 58.02,
+        "pool_label": "Strong Runner-Up",
+        "gt_label": null,
+        "cv_years": 2,
+        "required_years": 0,
+        "top_positive_signals": [],
+        "top_negative_signals": [],
+        "matched_jd_skills": [
+          "Python",
+          "Git"
+        ],
+        "missing_jd_skills": [],
+        "strengths": [
+          "Strong experience in Python and TensorFlow",
+          "Hands-on projects in computer vision and NLP",
+          "Experience with Git for version control",
+          "GenAI evidence found (langchain, llm, prompt engineering) — context: none"
+        ],
+        "gaps": [
+          "Lack of direct experience with Scikit-learn",
+          "No mention of FastAPI or Canva skills"
+        ],
+        "recommendation": "screening_call",
+        "interview_focus": [
+          "Can you explain your experience with data preprocessing techniques?",
+          "How do you approach integrating machine learning models into applications?",
+          "What is your understanding of statistics in the context of machine learning?"
+        ],
+        "genai_evidence": [
+          "langchain",
+          "llm",
+          "prompt engineering"
+        ],
+        "scoring_mode": "Student Mode",
+        "feature_attribution": [
+          {
+            "feature": "project_depth",
+            "contribution": 28.0
+          },
+          {
+            "feature": "education_fit",
+            "contribution": 14.0
+          },
+          {
+            "feature": "technical_match",
+            "contribution": 7.35
+          },
+          {
+            "feature": "genai_bonus",
+            "contribution": 5.0
+          },
+          {
+            "feature": "nice_to_have",
+            "contribution": 2.4
+          }
+        ]
+      }
+    },
+    {
+      "application_id": 4,
+      "candidate_id": 4,
+      "candidate_name": "salma adel",
+      "email": "ayassertawfikk@gmail.com",
+      "rank_in_pool": 3,
+      "total_in_pool": 4,
+      "final_score": 53.65,
+      "recommendation": "Strong Runner-Up",
+      "ce_logit": 0.0231,
+      "ce_prob": 0.5058,
+      "hybrid_score": 0.4137,
+      "hr_explanation_json": {
+        "candidate_id": 4,
+        "candidate_name": "salma adel",
+        "jd_id": 1,
+        "jd_title": "AI Intern (Computer Vision & NLP Focus)",
+        "rank": 3,
+        "pool_size": 4,
+        "match_score": 51,
+        "ce_logit": 0.0231,
+        "ce_probability": 0.5058,
+        "pipeline_score": 53.65,
+        "pool_label": "Strong Runner-Up",
+        "gt_label": null,
+        "cv_years": 0,
+        "required_years": 0,
+        "top_positive_signals": [],
+        "top_negative_signals": [],
+        "matched_jd_skills": [
+          "Python",
+          "Data Preprocessing",
+          "Git"
+        ],
+        "missing_jd_skills": [],
+        "strengths": [
+          "Proficient in Python and NLP",
+          "Experience with TensorFlow and PyTorch",
+          "Knowledge of data preprocessing and statistical analysis",
+          "GenAI evidence found (llm, prompt engineering) — context: production"
+        ],
+        "gaps": [
+          "No experience with API Integration (FastAPI)",
+          "No experience with Scikit-learn or Canva"
+        ],
+        "recommendation": "screening_call",
+        "interview_focus": [
+          "Can you explain your approach to data preprocessing in your projects?",
+          "How did you implement NLP techniques in your sentiment analysis project?",
+          "What challenges did you face while building the image classification model?"
+        ],
+        "genai_evidence": [
+          "llm",
+          "prompt engineering"
+        ],
+        "scoring_mode": "Student Mode",
+        "feature_attribution": [
+          {
+            "feature": "project_depth",
+            "contribution": 24.5
+          },
+          {
+            "feature": "genai_bonus",
+            "contribution": 15.0
+          },
+          {
+            "feature": "education_fit",
+            "contribution": 14.86
+          },
+          {
+            "feature": "technical_match",
+            "contribution": 6.96
+          },
+          {
+            "feature": "soft_skills",
+            "contribution": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "application_id": 3,
+      "candidate_id": 3,
+      "candidate_name": "eman mahmoud",
+      "email": "ayayaser130@gmail.com",
+      "rank_in_pool": 4,
+      "total_in_pool": 4,
+      "final_score": 50.88,
+      "recommendation": "Maybe",
+      "ce_logit": 0.2176,
+      "ce_prob": 0.5542,
+      "hybrid_score": 0.4299,
+      "hr_explanation_json": {
+        "candidate_id": 3,
+        "candidate_name": "eman mahmoud",
+        "jd_id": 1,
+        "jd_title": "AI Intern (Computer Vision & NLP Focus)",
+        "rank": 4,
+        "pool_size": 4,
+        "match_score": 55,
+        "ce_logit": 0.2176,
+        "ce_probability": 0.5542,
+        "pipeline_score": 50.88,
+        "pool_label": "Maybe",
+        "gt_label": null,
+        "cv_years": 0,
+        "required_years": 0,
+        "top_positive_signals": [],
+        "top_negative_signals": [],
+        "matched_jd_skills": [
+          "Python",
+          "Git"
+        ],
+        "missing_jd_skills": [],
+        "strengths": [
+          "Strong hands-on experience in Machine Learning and Deep Learning",
+          "Experience with Computer Vision projects",
+          "Knowledge of Natural Language Processing"
+        ],
+        "gaps": [
+          "No direct experience with Git mentioned",
+          "No experience with TensorFlow or PyTorch mentioned",
+          "No experience with API Integration (FastAPI) mentioned"
+        ],
+        "recommendation": "screening_call",
+        "interview_focus": [
+          "Can you explain your experience with data preprocessing techniques?",
+          "What specific machine learning models have you worked with in your projects?",
+          "How do you approach integrating AI models into applications?"
+        ],
+        "genai_evidence": [],
+        "scoring_mode": "Student Mode",
+        "feature_attribution": [
+          {
+            "feature": "project_depth",
+            "contribution": 28.0
+          },
+          {
+            "feature": "education_fit",
+            "contribution": 14.86
+          },
+          {
+            "feature": "project_complexity_boost",
+            "contribution": 7.0
+          },
+          {
+            "feature": "technical_match",
+            "contribution": 4.9
+          },
+          {
+            "feature": "nice_to_have",
+            "contribution": 2.4
+          }
+        ]
+      }
+    }
+  ]
+}

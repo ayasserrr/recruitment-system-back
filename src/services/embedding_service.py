@@ -4,8 +4,8 @@ Embedding Service
 Bi-Encoder + Cross-Encoder infrastructure for the recruitment pipeline.
 
 Models (lazy-loaded on first call — no GPU startup cost at import time):
-  Bi-Encoder:   intfloat/e5-large-v2   (1024-dim, MTEB retrieval avg 56.9)
-                Requires symmetric "query: " / "passage: " prefixes.
+  Bi-Encoder:   BAAI/bge-large-en-v1.5  (1024-dim, MTEB retrieval avg 64.2)
+                JD queries: long instruction prefix. CV passages: NO prefix.
   Cross-Encoder: BAAI/bge-reranker-v2-m3  (560MB, MTEB MRR@10 0.885, multilingual)
                 Faster fallback: cross-encoder/ms-marco-MiniLM-L-12-v2
 
@@ -38,7 +38,11 @@ from core.gpu import DEVICE
 logger = logging.getLogger(__name__)
 
 # ── Model identifiers ─────────────────────────────────────────────────────────
-_BIENCODER_MODEL_ID  = "intfloat/e5-large-v2"
+# bge-large-en-v1.5 outperforms e5-large-v2 on MTEB retrieval benchmarks.
+# Encoding protocol differs from e5: JDs use a long instruction prefix;
+# CVs (passages) are encoded with NO prefix.
+_BIENCODER_MODEL_ID  = "BAAI/bge-large-en-v1.5"
+_BGE_QUERY_PREFIX    = "Represent this sentence for searching relevant passages: "
 _CE_DEFAULT_MODEL_ID = "BAAI/bge-reranker-v2-m3"
 _CE_FAST_MODEL_ID    = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
@@ -154,7 +158,7 @@ def ce_score_to_label(ce_logit: float) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Bi-Encoder (intfloat/e5-large-v2)
+# Bi-Encoder (BAAI/bge-large-en-v1.5)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_biencoder():
@@ -205,14 +209,14 @@ def _get_biencoder():
 def encode_jd(jd_text: str) -> list[float]:
     """
     Encode a job description for retrieval.
-    e5-large-v2 requires the "query: " prefix on the retrieval query side.
+    bge-large-en-v1.5 requires the long instruction prefix on the query side only.
     Embeddings are L2-normalized (cosine similarity = dot product).
     """
     model = _get_biencoder()
     if model is None:
         logger.warning("[embedding_service] Bi-encoder unavailable — returning [].")
         return []
-    prefixed = f"query: {jd_text.strip()}"
+    prefixed = f"{_BGE_QUERY_PREFIX}{jd_text.strip()}"
     vec = model.encode(prefixed, normalize_embeddings=True)
     return vec.tolist()
 
@@ -220,24 +224,29 @@ def encode_jd(jd_text: str) -> list[float]:
 def encode_cv(cv_text: str) -> list[float]:
     """
     Encode a candidate CV for retrieval.
-    e5-large-v2 requires the "passage: " prefix on the document side.
+    bge-large-en-v1.5 encodes passages with NO prefix (unlike e5 which needed "passage: ").
     """
     model = _get_biencoder()
     if model is None:
         logger.warning("[embedding_service] Bi-encoder unavailable — returning [].")
         return []
-    prefixed = f"passage: {cv_text.strip()}"
-    vec = model.encode(prefixed, normalize_embeddings=True)
+    vec = model.encode(cv_text.strip(), normalize_embeddings=True)
     return vec.tolist()
 
 
 def encode_cvs_batch(cv_texts: list[str], batch_size: int = 32) -> list[list[float]]:
-    """Batch-encode a list of CV texts. More efficient than calling encode_cv in a loop."""
+    """
+    Batch-encode a list of CV texts.
+    bge-large-en-v1.5: passages have no prefix, so encode directly.
+    """
     model = _get_biencoder()
     if model is None:
         return [[] for _ in cv_texts]
-    prefixed = [f"passage: {t.strip()}" for t in cv_texts]
-    vecs = model.encode(prefixed, normalize_embeddings=True, batch_size=batch_size)
+    vecs = model.encode(
+        [t.strip() for t in cv_texts],
+        normalize_embeddings=True,
+        batch_size=batch_size,
+    )
     return [v.tolist() for v in vecs]
 
 
